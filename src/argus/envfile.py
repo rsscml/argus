@@ -1,4 +1,6 @@
-"""Environment-file loading — the one place the KEY=value format is defined.
+"""Environment-file loading — the one place the KEY=value format is defined
+(parsing delegated to python-dotenv; interpolation disabled so secrets are
+taken literally).
 
 Argus reads configuration in four layers. ``load_process_env()`` applies the
 file layers to ``os.environ`` once per process, at the first
@@ -28,7 +30,11 @@ consumers at once.
 from __future__ import annotations
 
 import os
+import re
+from io import StringIO
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 __all__ = [
     "parse_env_file", "load_env_file", "load_process_env",
@@ -37,33 +43,36 @@ __all__ = [
 
 _loaded = False  # load_process_env ran in this process
 
+# `KEY=   # note` — an empty value followed by an inline comment. python-dotenv
+# parses the comment AS the value here (it only strips inline comments after a
+# non-empty value), which would silently poison settings like ARGUS_DB_URL=.
+# Rewrite just that shape to a plain empty value before dotenv sees it; the
+# space requirement (=\s+#) keeps deliberate values like KEY=#abc and quoted
+# KEY="#tag" untouched.
+_EMPTY_THEN_COMMENT = re.compile(r"^(\s*(?:export\s+)?[^=\s#]+\s*=)\s+#.*$")
+
 
 # --------------------------------------------------------------------------
 # the format
 # --------------------------------------------------------------------------
 
 def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse a KEY=value file. Blank lines and ``#`` comments are skipped,
-    a leading ``export `` is tolerated, whitespace around key and value is
-    stripped, and one layer of matching single or double quotes is removed
-    (so ``KEY="a # b"`` keeps its hash). Lines without ``=`` are ignored.
-    Returns {} for a missing file."""
+    """Parse a KEY=value file with python-dotenv semantics: ``#`` full-line
+    comments, inline comments after a space (``DIM=256  # note`` yields
+    ``256``; quote values that must contain ``␣#``), ``export`` prefixes,
+    single/double quotes, and quoted multi-line values. Two deliberate
+    deviations from stock dotenv: no ``${VAR}`` interpolation (secrets are
+    taken literally — quote style makes no difference), and
+    ``KEY=   # comment`` yields an empty value rather than the comment text.
+    Bare keys without ``=`` are dropped. Returns {} for a missing file."""
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key:
-            values[key] = value
-    return values
+    text = "\n".join(
+        _EMPTY_THEN_COMMENT.sub(r"\1", line)
+        for line in path.read_text().splitlines()
+    )
+    parsed = dotenv_values(stream=StringIO(text), interpolate=False)
+    return {k: v for k, v in parsed.items() if v is not None}
 
 
 def load_env_file(path: Path, *, override: bool = False) -> dict[str, str]:
