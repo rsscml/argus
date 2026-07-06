@@ -48,12 +48,16 @@ The toast shows the commit hash. Outside a git repository everything still
 works; saves are just reported as unversioned. Hand-written YAML comments are
 not preserved by UI saves — the backup keeps the pre-edit text.
 
-Settings are different by design (secrets never live in config files): the
-settings page writes `data/webapp/overrides.env` (mode 0600) and applies
-values to the running server. Values saved there override your shell
-environment. Most settings apply to the *next* run; the data directory,
-database URL, and Qdrant URL are bound at startup and flagged as
-restart-required.
+Settings are different by design (secrets never live in *versioned* config
+files): the settings page writes `<data>/webapp/overrides.env` (mode 0600)
+and applies values to the running server. Configuration layers, lowest to
+highest: built-in defaults < a project-root `.env` (copy `.env.example`;
+fills gaps, never overrides your shell) < shell exports < this overrides
+file — which wins deliberately, so a value saved here takes effect
+everywhere, including `argus brief` run from cron. All entry points load the
+same chain through `argus/envfile.py`. Most settings apply to the *next*
+run; the data directory, database URL, and Qdrant URL are bound at startup
+and flagged as restart-required.
 
 ## Schedules
 

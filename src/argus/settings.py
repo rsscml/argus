@@ -1,13 +1,20 @@
 """Runtime settings (env-driven, prefix ARGUS_).
 
-Secrets never live in config files (architecture SS12.4); connection strings
-and paths come from the environment.
+Values come from the environment. ``get_settings()`` first runs
+``argus.envfile.load_process_env()``, which folds two optional files into
+``os.environ`` — a project-root ``.env`` (fills gaps; see .env.example) and
+the web console's ``<data>/webapp/overrides.env`` (wins over the shell).
+Precedence, lowest to highest: field defaults here < .env < shell <
+console overrides. Secrets never live in *versioned* config files
+(architecture SS12.4); both env files are gitignored.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from argus.envfile import load_process_env
 
 
 class Settings(BaseSettings):
@@ -57,4 +64,5 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
+    load_process_env()  # .env + console overrides -> os.environ (once per process)
     return Settings()

@@ -98,4 +98,16 @@ overrides file, never to config files (SS12.4). Long actions run through a
 single-worker job queue (the dev deployment shares SQLite and an embedded,
 file-locked Qdrant). Scheduling uses APScheduler over each profile's
 `brief_cron`, off by default per domain. Optional password gate via
-`ARGUS_WEB_PASSWORD` or the settings page. Full guide: `docs/webapp.md`. Regression suite: `pytest tests/test_webapp.py` (offline, ~10 s).
+`ARGUS_WEB_PASSWORD` or the settings page. Full guide: `docs/webapp.md`. Regression suites: `pytest tests/` (offline, ~10 s).
+
+### Configuration & `.env`
+
+All configuration is environment-driven and loads through one door:
+`get_settings()` first folds two optional files into the process
+environment via `argus/envfile.py`, then pydantic-settings reads the
+`ARGUS_*` keys and the model factory reads the `AZURE_OPENAI_*` keys.
+Precedence, lowest to highest: built-in defaults < `./.env` (copy
+`.env.example`, gitignored, never overrides your shell) < shell exports <
+`<data>/webapp/overrides.env` (the web console's Settings page — wins
+deliberately, and reaches CLI/cron runs too). Every variable is
+documented in `.env.example`.

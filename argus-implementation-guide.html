@@ -233,7 +233,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
     <a href="#s8"><span class="n">08</span>Field notes</a>
     <a href="#s9"><span class="n">09</span>Web console</a>
   </nav>
-  <div class="foot"><b>argus 0.1.0</b> · arch doc v0.3<br>M1–M6 + web console · 79 tests green</div>
+  <div class="foot"><b>argus 0.1.0</b> · arch doc v0.3<br>M1–M6 + web console · 86 tests green</div>
 </aside>
 
 <main class="page">
@@ -253,7 +253,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <span class="stat"><b>13 packages</b> · zero domain-specific engine code</span>
       <span class="stat"><b>3-page console</b> · same entry points as the CLI</span>
       <span class="stat"><b>2 domains</b> onboarded as pure configuration</span>
-      <span class="stat"><b>79/79</b> tests, Postgres-live</span>
+      <span class="stat"><b>86/86</b> tests, Postgres-live</span>
     </div>
 
     <div class="chain" aria-label="Chain of custody from feed to cited sentence">
@@ -488,7 +488,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 │   ├── webapp/                  <span class="c"># FastAPI console · job queue · scheduler · config store (§09)</span>
 │   ├── llm/factory.py           <span class="c"># the ONE place Azure models are constructed (AD-10)</span>
 │   ├── settings.py · wiring.py · cli.py · util.py
-├── tests/                       <span class="c"># 79 tests (70 engine + 9 console) incl. golden/&lt;domain&gt;/cases.yaml</span>
+├── tests/                       <span class="c"># 86 tests (70 engine + 16 console/config) incl. golden/&lt;domain&gt;/cases.yaml</span>
 └── pyproject.toml               <span class="c"># extras: [dev] pytest+reportlab · [postgres] checkpointer</span></pre></div>
 
     <div class="grid g2 rv">
@@ -1011,7 +1011,8 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
     <div class="codewrap rv"><button class="copy" data-copy>Copy</button><pre><span class="p">$</span> pip install -e <span class="s">".[webapp]"</span> &amp;&amp; argus-web     <span class="c"># http://127.0.0.1:8765 — every command below has a console home (§09·G)</span></pre></div>
 
     <h3>Production switches</h3>
-    <div class="codewrap rv"><button class="copy" data-copy>Copy</button><pre><span class="c"># Azure OpenAI (AD-10) — the factory refuses to start without these</span>
+    <div class="codewrap rv"><button class="copy" data-copy>Copy</button><pre><span class="c"># Azure OpenAI (AD-10) — the factory refuses to start without these.
+# Exports shown; equivalently: cp .env.example .env and uncomment (parsed by every entry point)</span>
 <span class="p">$</span> export AZURE_OPENAI_ENDPOINT=https://…openai.azure.com
 <span class="p">$</span> export AZURE_OPENAI_API_KEY=…                       <span class="c"># secrets via env, never config files</span>
 <span class="p">$</span> export AZURE_OPENAI_API_VERSION=2024-10-21          <span class="c"># pinned; recorded in every manifest</span>
@@ -1045,8 +1046,14 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <tr><td class="mono">argus runs</td><td>Recent runs with workload, status, and output path.</td><td class="mono">--limit 10</td></tr>
     </table></div>
     <h3>Environment variables (prefix ARGUS_)</h3>
-    <p>Runtime settings come from the environment only — secrets never live in config files. Empty values derive
-    sensible dev defaults under the data directory.</p>
+    <p>Runtime settings are environment-driven, with one loading door: <code>get_settings()</code> first folds two
+    optional files into the process environment (<code>argus/envfile.py</code>), then pydantic-settings parses the
+    <code>ARGUS_*</code> keys and the model factory reads <code>AZURE_OPENAI_*</code> from <code>os.environ</code>.
+    Declare values in your shell, in a project-root <code>.env</code> (copy the annotated <code>.env.example</code>;
+    gitignored; fills gaps, never overrides an export), or in the console's Settings page (§09·D) — precedence, lowest
+    to highest: <span class="badge b-inert">defaults</span> &lt; <span class="badge b-inert">.env</span> &lt;
+    <span class="badge b-inert">shell</span> &lt; <span class="badge b-inert">console overrides</span>. Secrets never
+    live in <em>versioned</em> config files. Empty values derive sensible dev defaults under the data directory.</p>
     <div class="scrollx rv"><table>
       <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
       <tr><td class="mono">ARGUS_DATA_DIR</td><td class="mono">data</td><td>Root for blobs (<code>snapshots/</code>), dev SQLite, embedded Qdrant, checkpoints, and <code>briefs/</code>.</td></tr>
@@ -1325,7 +1332,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
     <h3>09·D — Settings without config files</h3>
     <p>The Settings tab edits every <code>ARGUS_*</code> knob from §07 in grouped, explained forms. Saves persist to
     <code>data/webapp/overrides.env</code> (mode <code>0600</code>) and apply to the running server immediately —
-    values saved there <strong>override the shell environment</strong>. Secrets are write-only: the API reports
+    values saved there <strong>override the shell environment</strong> — and, because every entry point loads the same <code>argus/envfile.py</code> chain (defaults &lt; <code>.env</code> &lt; shell &lt; overrides), a value saved in the console reaches <code>argus brief</code> under cron too. Secrets are write-only: the API reports
     <em>set / not set</em> and never echoes a value. Most settings take effect on the next run; the three bound at
     startup — data dir, DB URL, Qdrant URL — are flagged <span class="badge b-attr">restart required</span> in the UI
     and in the provenance strip until the server restarts.</p>
@@ -1371,10 +1378,9 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 
     <div class="callout rv">
       <div class="k">Verified end to end</div>
-      <p>The console ships with its own regression suite — <code>pytest tests/test_webapp.py</code>: 9 tests walking the
-      full operator flow (brief → manifest → replay, research, golden pass <em>and</em> fail paths, registry edits with
+      <p>The console ships with its own regression suite — <code>pytest tests/</code>: 16 tests — the full operator flow (brief → manifest → replay, research, golden pass <em>and</em> fail paths, registry edits with
       commits, cron validation, scheduler next-run times, candidate approve-as-paused, settings round-trip with secret
-      masking, the auth gate) against a hermetic throwaway workspace, offline, in ~10 seconds. The build was additionally
+      masking, the auth gate) plus the four-layer configuration loader (§07), against hermetic throwaway workspaces, offline, in ~10 seconds. The build was additionally
       exercised with 42 live HTTP checks and DOM-rendering tests of all three pages against captured API fixtures.</p>
     </div>
   </div>
@@ -1383,7 +1389,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 <footer>
   <div class="col">
     ARGUS · controlled-source research agent · implementation guide<br>
-    architecture doc v0.3 (2026-07-05) · milestones M1–M6 + web console · 79 tests (70 engine · 9 console) · generated from source, not from memory<br>
+    architecture doc v0.3 (2026-07-05) · milestones M1–M6 + web console · 86 tests (70 engine · 16 console/config) · generated from source, not from memory<br>
     <span style="color:#8b9a94">research output only — not investment, legal, or operational advice</span>
   </div>
 </footer>

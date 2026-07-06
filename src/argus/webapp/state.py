@@ -2,8 +2,9 @@
 
 Three shared things live for the whole server process:
 
-1. **Settings overrides** — a `KEY=value` file the settings page writes.
-   Values are applied to ``os.environ`` at startup and on every save, and
+1. **Settings overrides** — a `KEY=value` file the settings page writes
+   (highest layer of the precedence in ``argus.envfile``: defaults < .env <
+   shell < overrides). Applied to ``os.environ`` at startup and on save, and
    ``argus.settings.get_settings()`` is constructed fresh per request/job, so
    most changes take effect on the *next* action without a restart. Keys that
    are bound at process start (data dir, DB URL, Qdrant URL) are flagged as
@@ -33,51 +34,18 @@ from argus.snapshots.db import init_db
 # settings overrides (the settings page's persistence)
 # --------------------------------------------------------------------------
 
-def overrides_path() -> Path:
-    root = Path(os.environ.get("ARGUS_WEBAPP_STATE", "data/webapp"))
-    return root / "overrides.env"
-
-
-def read_overrides() -> dict[str, str]:
-    path = overrides_path()
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    return values
-
-
-def write_overrides(values: dict[str, str]) -> None:
-    path = overrides_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "# Argus web settings overrides — managed by the settings page.",
-        "# Values here are applied to the environment at server start and on",
-        "# every save. Delete a line (or the file) to fall back to the shell",
-        "# environment / built-in defaults. Keep this file private: it may",
-        "# hold the Azure OpenAI key (use a real secret manager in prod).",
-    ]
-    lines += [f"{k}={v}" for k, v in sorted(values.items())]
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n")
-    os.replace(tmp, path)
-    try:  # best-effort: the file may hold a secret
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+# The overrides file format and location live in argus.envfile (one format
+# definition for .env and overrides.env alike); re-exported here for the
+# API and config_store.
+from argus.envfile import (load_process_env, overrides_path,  # noqa: F401
+                           read_overrides, write_overrides)
 
 
 def apply_overrides() -> dict[str, str]:
-    """Load the overrides file into os.environ (UI-saved values win)."""
-    values = read_overrides()
-    for key, value in values.items():
-        os.environ[key] = value
-    return values
+    """Force-load .env + the overrides file into os.environ (UI values win),
+    then report the overrides currently in force."""
+    load_process_env(force=True)
+    return read_overrides()
 
 
 # --------------------------------------------------------------------------
