@@ -11,11 +11,13 @@ from argus.fetchers.base import (
 from argus.fetchers.http_api import HttpApiFetcher
 from argus.fetchers.local_folder import LocalFolderFetcher
 from argus.fetchers.rss import RssFetcher
+from argus.fetchers.site_scraper import SiteScraperFetcher
 
 ADAPTERS: dict[str, type[Fetcher]] = {
     RssFetcher.name: RssFetcher,
     LocalFolderFetcher.name: LocalFolderFetcher,
     HttpApiFetcher.name: HttpApiFetcher,
+    SiteScraperFetcher.name: SiteScraperFetcher,
     # "sitemap": planned (SS5.3); registry entries referencing it fail validation loudly.
 }
 
