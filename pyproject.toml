@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "reportlab>=4.0"]  # reportlab: test/demo PDF generation only
 postgres = ["langgraph-checkpoint-postgres>=2.0", "psycopg[binary]>=3.1"]  # prod checkpointer (SS10)
+entra = ["azure-identity>=1.17"]  # ARGUS_AZURE_AUTH=default_credential (Entra ID, SS12.4)
 webapp = [
     "fastapi>=0.115",
     "uvicorn>=0.30",

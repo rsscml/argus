@@ -26,7 +26,10 @@ exposed further.
 Embeddings to `hashing` in Settings (or export `ARGUS_LLM=stub
 ARGUS_EMBEDDER=hashing`). Everything runs offline with a deterministic
 extractive synthesizer — the full pipeline, real verdict labels, real
-citations. Switch both to `azure` and fill in the Azure section when ready.
+citations. Switch both to `azure` and fill in the Azure section when ready. Key auth is
+the default; pick `default_credential` under Authentication for Entra ID
+(managed identity / `az login` — install the `entra` extra) and leave the
+key blank.
 
 Run the server from the repository root: registry, domain, and local-corpus
 paths are resolved relative to the working directory, same as the CLI.

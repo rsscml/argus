@@ -105,11 +105,18 @@ def overview(request: Request):
     azure_missing = []
     if settings.llm == "azure" or settings.embedder == "azure":
         import os
-        needed = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
-                  "AZURE_OPENAI_API_VERSION", "ARGUS_AZURE_EMBEDDING_DEPLOYMENT",
+
+        from argus.llm.factory import AzureConfigError, auth_mode
+        needed = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION",
+                  "ARGUS_AZURE_EMBEDDING_DEPLOYMENT",
                   "ARGUS_AZURE_SYNTHESIS_DEPLOYMENT",
                   "ARGUS_AZURE_UTILITY_DEPLOYMENT"]
-        azure_missing = [k for k in needed if not os.environ.get(k)]
+        try:
+            if auth_mode() == "api_key":  # under Entra ID no key is needed
+                needed.insert(1, "AZURE_OPENAI_API_KEY")
+        except AzureConfigError:
+            azure_missing.append("ARGUS_AZURE_AUTH (invalid value)")
+        azure_missing += [k for k in needed if not os.environ.get(k)]
 
     return {
         "domains": domains,

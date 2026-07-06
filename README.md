@@ -110,4 +110,6 @@ Precedence, lowest to highest: built-in defaults < `./.env` (copy
 `.env.example`, gitignored, never overrides your shell) < shell exports <
 `<data>/webapp/overrides.env` (the web console's Settings page — wins
 deliberately, and reaches CLI/cron runs too). Every variable is
-documented in `.env.example`.
+documented in `.env.example`. Azure auth supports Entra ID as an
+alternative to keys: `ARGUS_AZURE_AUTH=default_credential` (the `entra`
+extra) authenticates via `DefaultAzureCredential`.

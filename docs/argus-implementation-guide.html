@@ -233,7 +233,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
     <a href="#s8"><span class="n">08</span>Field notes</a>
     <a href="#s9"><span class="n">09</span>Web console</a>
   </nav>
-  <div class="foot"><b>argus 0.1.0</b> · arch doc v0.3<br>M1–M6 + web console · 86 tests green</div>
+  <div class="foot"><b>argus 0.1.0</b> · arch doc v0.3<br>M1–M6 + web console · 90 tests green</div>
 </aside>
 
 <main class="page">
@@ -253,7 +253,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <span class="stat"><b>13 packages</b> · zero domain-specific engine code</span>
       <span class="stat"><b>3-page console</b> · same entry points as the CLI</span>
       <span class="stat"><b>2 domains</b> onboarded as pure configuration</span>
-      <span class="stat"><b>86/86</b> tests, Postgres-live</span>
+      <span class="stat"><b>90/90</b> tests, Postgres-live</span>
     </div>
 
     <div class="chain" aria-label="Chain of custody from feed to cited sentence">
@@ -488,7 +488,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 │   ├── webapp/                  <span class="c"># FastAPI console · job queue · scheduler · config store (§09)</span>
 │   ├── llm/factory.py           <span class="c"># the ONE place Azure models are constructed (AD-10)</span>
 │   ├── settings.py · wiring.py · cli.py · util.py
-├── tests/                       <span class="c"># 86 tests (70 engine + 16 console/config) incl. golden/&lt;domain&gt;/cases.yaml</span>
+├── tests/                       <span class="c"># 90 tests (70 engine + 20 console/config) incl. golden/&lt;domain&gt;/cases.yaml</span>
 └── pyproject.toml               <span class="c"># extras: [dev] pytest+reportlab · [postgres] checkpointer</span></pre></div>
 
     <div class="grid g2 rv">
@@ -561,7 +561,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <div class="comp"><div class="path">src/argus/llm/factory.py</div><div class="role">The single Azure seam (AD-10)</div>
         <p>The only module that constructs model objects. Two role deployments — <code>synthesis</code> (strong: writing,
         planning) and <code>utility</code> (cheap: extraction, pairing, entailment, reflection) — both defaulting to
-        temperature 0. <code>model_fingerprint()</code> exposes deployment + <code>api_version</code> for manifests.</p>
+        temperature 0. Authentication is a switch, not a fork: <code>ARGUS_AZURE_AUTH</code> selects the classic API key or Entra ID via <code>DefaultAzureCredential</code> (managed identity · workload identity · <code>az login</code>) for chat and embeddings alike, one credential per process. <code>model_fingerprint()</code> exposes deployment + <code>api_version</code> + auth mode for manifests.</p>
         <div class="sym"><code>get_chat_model(role) · get_azure_embeddings · model_fingerprint</code></div></div>
 
       <div class="comp"><div class="path">settings.py · wiring.py · cli.py</div><div class="role">Operator surface</div>
@@ -593,7 +593,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <tr><th>Layer</th><th>Choice</th><th>Role in Argus</th></tr>
       <tr><td>Orchestration</td><td class="mono">langgraph ≥ 1.2</td><td>Both workload graphs <em>and</em> the ingestion pipeline; checkpoint per superstep, <code>thread_id == run_id</code>.</td></tr>
       <tr><td>Checkpointers</td><td class="mono">langgraph-checkpoint-sqlite / -postgres</td><td>SQLite under the data dir by default; Postgres via <code>ARGUS_CHECKPOINT_URL</code> (the <code>[postgres]</code> extra).</td></tr>
-      <tr><td>LLM</td><td class="mono">langchain-openai · AzureChatOpenAI</td><td>Two pinned role deployments, temperature 0 for extraction / pairing / verification; structured output via Pydantic.</td></tr>
+      <tr><td>LLM</td><td class="mono">langchain-openai · AzureChatOpenAI</td><td>Two pinned role deployments, temperature 0 for extraction / pairing / verification; structured output via Pydantic; key or Entra ID auth (<code>ARGUS_AZURE_AUTH</code>).</td></tr>
       <tr><td>Embeddings</td><td class="mono">AzureOpenAIEmbeddings · HashingEmbedder</td><td>Prod dense vectors vs. a deterministic offline stand-in; (name, dimension) stamped on the collection.</td></tr>
       <tr><td>Vector index</td><td class="mono">qdrant-client ≥ 1.12</td><td>Named vectors — <code>dense</code> (cosine) + <code>sparse</code> (client TF, server IDF) — fused with RRF; embedded local mode for dev.</td></tr>
       <tr><td>Relational</td><td class="mono">SQLAlchemy 2</td><td>Snapshots, watermarks, fetch events, MinHash signatures, runs, candidates. Naive-UTC datetimes throughout.</td></tr>
@@ -1014,7 +1014,8 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
     <div class="codewrap rv"><button class="copy" data-copy>Copy</button><pre><span class="c"># Azure OpenAI (AD-10) — the factory refuses to start without these.
 # Exports shown; equivalently: cp .env.example .env and uncomment (parsed by every entry point)</span>
 <span class="p">$</span> export AZURE_OPENAI_ENDPOINT=https://…openai.azure.com
-<span class="p">$</span> export AZURE_OPENAI_API_KEY=…                       <span class="c"># secrets via env, never config files</span>
+<span class="p">$</span> export AZURE_OPENAI_API_KEY=…                       <span class="c"># key auth (default) — or Entra ID instead:</span>
+<span class="p">$</span> export ARGUS_AZURE_AUTH=default_credential         <span class="c"># DefaultAzureCredential; no key · pip install -e ".[entra]"</span>
 <span class="p">$</span> export AZURE_OPENAI_API_VERSION=2024-10-21          <span class="c"># pinned; recorded in every manifest</span>
 <span class="p">$</span> export ARGUS_AZURE_SYNTHESIS_DEPLOYMENT=gpt-strong  <span class="c"># writing + planning</span>
 <span class="p">$</span> export ARGUS_AZURE_UTILITY_DEPLOYMENT=gpt-mini      <span class="c"># extraction · pairing · entailment</span>
@@ -1073,6 +1074,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
       <tr><td class="mono">ARGUS_RESEARCH_MAX_EVIDENCE / _RESEARCH_SUB_QUESTIONS_MAX</td><td class="mono">40 / 4</td><td>Deep-research evidence and planner caps.</td></tr>
       <tr><td class="mono">AZURE_OPENAI_ENDPOINT / _API_KEY / _API_VERSION</td><td class="mono">—</td><td>Required in azure mode; api_version is pinned and recorded per run.</td></tr>
       <tr><td class="mono">ARGUS_AZURE_SYNTHESIS / _UTILITY / _EMBEDDING_DEPLOYMENT</td><td class="mono">—</td><td>The three role deployments constructed by the factory.</td></tr>
+      <tr><td class="mono">ARGUS_AZURE_AUTH</td><td class="mono">api_key</td><td><code>api_key</code> or <code>default_credential</code> — Entra ID via <code>DefaultAzureCredential</code> for chat <em>and</em> embeddings (managed identity · workload identity · <code>az login</code>; the <code>entra</code> extra). The API key is then not required, and the console stops flagging it as missing.</td></tr>
       <tr><td class="mono">ARGUS_TEST_POSTGRES_URL</td><td class="mono">(unset)</td><td>Enables the live Postgres checkpointer integration test; skipped otherwise.</td></tr>
       <tr><td class="mono">ARGUS_WEB_HOST / ARGUS_WEB_PORT</td><td class="mono">127.0.0.1 / 8765</td><td>Console bind address — read at <code>argus-web</code> startup.</td></tr>
       <tr><td class="mono">ARGUS_WEB_PASSWORD</td><td class="mono">(unset)</td><td>Enables the console’s auth gate; checked per request, so Settings can set or clear it live. Console-saved settings persist to <code>data/webapp/overrides.env</code> and override the shell (§09·D).</td></tr>
@@ -1378,9 +1380,9 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 
     <div class="callout rv">
       <div class="k">Verified end to end</div>
-      <p>The console ships with its own regression suite — <code>pytest tests/</code>: 16 tests — the full operator flow (brief → manifest → replay, research, golden pass <em>and</em> fail paths, registry edits with
+      <p>The console ships with its own regression suite — <code>pytest tests/</code>: 20 tests — the full operator flow (brief → manifest → replay, research, golden pass <em>and</em> fail paths, registry edits with
       commits, cron validation, scheduler next-run times, candidate approve-as-paused, settings round-trip with secret
-      masking, the auth gate) plus the four-layer configuration loader (§07), against hermetic throwaway workspaces, offline, in ~10 seconds. The build was additionally
+      masking, the auth gate) plus the four-layer configuration loader (§07) and the Azure auth seam, against hermetic throwaway workspaces, offline, in ~10 seconds. The build was additionally
       exercised with 42 live HTTP checks and DOM-rendering tests of all three pages against captured API fixtures.</p>
     </div>
   </div>
@@ -1389,7 +1391,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--signal);outline-off
 <footer>
   <div class="col">
     ARGUS · controlled-source research agent · implementation guide<br>
-    architecture doc v0.3 (2026-07-05) · milestones M1–M6 + web console · 86 tests (70 engine · 16 console/config) · generated from source, not from memory<br>
+    architecture doc v0.3 (2026-07-05) · milestones M1–M6 + web console · 90 tests (70 engine · 20 console/config) · generated from source, not from memory<br>
     <span style="color:#8b9a94">research output only — not investment, legal, or operational advice</span>
   </div>
 </footer>

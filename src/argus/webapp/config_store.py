@@ -266,11 +266,17 @@ SETTING_FIELDS: list[tuple[str, str, str, str, bool, bool, str]] = [
      "Qdrant collection holding the hybrid index. Bump this to start a fresh "
      "index (e.g. after switching embedders)."),
 
+    ("ARGUS_AZURE_AUTH", "azure", "Authentication", "choice:api_key,default_credential",
+     False, False,
+     "api_key = the classic key below. default_credential = Entra ID via "
+     "DefaultAzureCredential (managed identity, workload identity, az login) — "
+     "no key is stored anywhere; needs `pip install -e \".[entra]\"`."),
     ("AZURE_OPENAI_ENDPOINT", "azure", "Azure OpenAI endpoint", "text", False, False,
      "https://<resource>.openai.azure.com"),
     ("AZURE_OPENAI_API_KEY", "azure", "Azure OpenAI API key", "secret", False, True,
-     "Stored in data/webapp/overrides.env (0600). Prefer a managed identity "
-     "or secret manager in production (architecture SS12.4)."),
+     "Required only when Authentication is api_key; ignored under "
+     "default_credential. Stored in <data>/webapp/overrides.env (0600). "
+     "Prefer Entra ID or a secret manager in production (SS12.4)."),
     ("AZURE_OPENAI_API_VERSION", "azure", "API version", "text", False, False,
      "Pinned per run into every manifest (SS12.1)."),
     ("ARGUS_AZURE_SYNTHESIS_DEPLOYMENT", "azure", "Synthesis deployment", "text",
