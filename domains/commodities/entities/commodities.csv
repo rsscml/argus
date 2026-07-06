@@ -1,0 +1,13 @@
+surface_form,canonical_id,type
+WTI,CMD:WTI,commodity
+West Texas Intermediate,CMD:WTI,commodity
+Brent,CMD:BRENT,commodity
+Brent crude,CMD:BRENT,commodity
+VLCC,SHP:VLCC,vessel_class
+very large crude carrier,SHP:VLCC,vessel_class
+Strait of Hormuz,GEO:HORMUZ,chokepoint
+Hormuz,GEO:HORMUZ,chokepoint
+Ras Tanura,GEO:RAS_TANURA,port
+Bandar Abbas,GEO:BANDAR_ABBAS,port
+OPEC,ORG:OPEC,organization
+war-risk premium,MET:WAR_RISK_PREMIUM,metric

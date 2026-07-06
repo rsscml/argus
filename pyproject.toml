@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus-research-agent"
+version = "0.1.0"
+description = "Controlled-source research agent - M1: source registry, fetcher layer, snapshot store (architecture v0.2)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+    "SQLAlchemy>=2.0",
+    "feedparser>=6.0.11",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "langgraph>=1.2",
+    "langchain-openai>=0.3",
+    "langchain-text-splitters>=0.3",
+    "qdrant-client>=1.12",
+    "datasketch>=1.6",
+    "trafilatura>=1.8",
+    "pypdf>=5.0",
+    "jinja2>=3.1",
+    "langgraph-checkpoint-sqlite>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "reportlab>=4.0"]  # reportlab: test/demo PDF generation only
+postgres = ["langgraph-checkpoint-postgres>=2.0", "psycopg[binary]>=3.1"]  # prod checkpointer (SS10)
+webapp = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "apscheduler>=3.10,<4",   # architecture SS10: cron / APScheduler
+    "markdown>=3.6",          # server-side brief/report rendering
+]
+
+[project.scripts]
+argus = "argus.cli:main"
+argus-web = "argus.webapp.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

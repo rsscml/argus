@@ -1,0 +1,7 @@
+surface_form,canonical_id,type
+Strait of Hormuz,GEO:HORMUZ,chokepoint
+Hormuz,GEO:HORMUZ,chokepoint
+Bandar Abbas,GEO:BANDAR_ABBAS,port
+Fifth Fleet,ORG:US_5TH_FLEET,military
+IRGC,ORG:IRGC,military
+Islamic Revolutionary Guard Corps,ORG:IRGC,military

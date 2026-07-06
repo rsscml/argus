@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="mast"></header>
+
+<div class="wrap">
+  <h1 class="page-title">Admin</h1>
+  <p class="page-sub">Govern what Argus is allowed to trust: the source registry,
+    each domain's profile and vocabulary, proposed sources awaiting review, and
+    engine settings. Every registry and profile save is validated, backed up,
+    and committed to git so the trust trail stays auditable.</p>
+
+  <div class="tabs" id="tabs">
+    <button data-t="sources" class="active">Sources</button>
+    <button data-t="domains">Domains</button>
+    <button data-t="candidates">Candidates <span class="n" id="cand-n"></span></button>
+    <button data-t="settings">Settings</button>
+  </div>
+
+  <section id="tab-sources"></section>
+  <section id="tab-domains" hidden></section>
+  <section id="tab-candidates" hidden></section>
+  <section id="tab-settings" hidden></section>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const { api, el, esc, toast, modal, statusBadge, tierBadge, fmtTime } = A;
+let REG = null;
+
+/* ====================== tabs ====================== */
+const tabs = document.getElementById("tabs");
+tabs.addEventListener("click", (e) => {
+  const btn = e.target.closest("button"); if (!btn) return;
+  tabs.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+  for (const t of ["sources", "domains", "candidates", "settings"])
+    document.getElementById("tab-" + t).hidden = btn.dataset.t !== t;
+  location.hash = btn.dataset.t;
+});
+function openHashTab() {
+  const t = location.hash.replace("#", "");
+  const btn = tabs.querySelector(`[data-t="${t}"]`);
+  if (btn) btn.click();
+}
+
+/* ====================== sources ====================== */
+async function loadSources() {
+  REG = await api("/api/registry");
+  const host = document.getElementById("tab-sources");
+  host.innerHTML = "";
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "card-head" },
+    el("h2", {}, "Source registry",
+      el("span", { class: "hint" }, REG.sources.length + " sources · commit " +
+        A.short(REG.commit || "uncommitted", 14))),
+    el("div", { class: "spacer" }),
+    el("button", { class: "btn primary", onclick: () => sourceDrawer(null) }, "Add source")));
+  if (REG.dirty) card.appendChild(el("div", { class: "banner warn" },
+    "The registry file has uncommitted changes (edited outside this app). " +
+    "The next save from here will commit everything in the file."));
+
+  const tbl = el("table", { class: "tbl" },
+    el("thead", {}, el("tr", {},
+      ...["Source", "Fetch", "Tags · tier", "Status", ""].map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const s of REG.sources) {
+    const tags = el("td", {}, ...Object.entries(s.tags).map(([tag, p]) =>
+      el("span", { class: "tagchip" }, tag, tierBadge(p.tier))));
+    const actions = el("td", { style: "text-align:right;white-space:nowrap" },
+      el("button", { class: "btn small", onclick: () => sourceDrawer(s) }, "Edit"), " ",
+      s.status === "active"
+        ? el("button", { class: "btn small", onclick: () => setStatus(s.id, "paused") }, "Pause")
+        : el("button", { class: "btn small", onclick: () => setStatus(s.id, "active") }, "Activate"));
+    tb.appendChild(el("tr", {},
+      el("td", {}, el("div", {}, s.name),
+        el("div", { class: "mono" }, s.id + (s.independence_group && s.independence_group !== s.id
+          ? " · group " + s.independence_group : ""))),
+      el("td", {}, el("div", {}, s.fetch.adapter),
+        el("div", { class: "mono", title: s.fetch.endpoints.join("\n") },
+          A.short(s.fetch.endpoints[0], 42) + (s.fetch.endpoints.length > 1 ? " +" + (s.fetch.endpoints.length - 1) : ""))),
+      tags,
+      el("td", {}, statusBadge(s.status)),
+      actions));
+  }
+  tbl.appendChild(tb);
+  card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  card.appendChild(el("p", { class: "note", style: "margin-top:10px" },
+    "Tier Ⅰ = primary / wire / official (can confirm a claim) · Ⅱ = reputable editorial · " +
+    "Ⅲ = supplementary (can inform, never confirm alone). Tiers are per tag: the same outlet " +
+    "can be Ⅰ for one beat and Ⅲ for another. Paused sources are never fetched."));
+  host.appendChild(card);
+}
+
+async function setStatus(id, status) {
+  try {
+    const r = await api(`/api/registry/sources/${id}/status`, { method: "POST", body: { status } });
+    toast(`${id} ${status}` + (r.committed ? ` · committed ${r.commit}` : ""), "ok");
+    loadSources(); A.overview(true).then(A.renderStamps);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function sourceDrawer(existing) {
+  const s = existing || {
+    id: "", name: "", homepage: "", language: "en",
+    fetch: { adapter: "rss", endpoints: [""] },
+    license: "", tags: {}, status: "active", notes: "",
+  };
+  const f = {};
+  const input = (key, label, value, opts = {}) => {
+    f[key] = el("input", { type: "text", value: value ?? "", ...opts.attrs });
+    return el("label", { class: "field" }, el("span", {}, label), f[key],
+      opts.help ? el("span", { class: "help" }, opts.help) : null);
+  };
+  f.adapter = el("select", {}, ...REG.adapters.map(a =>
+    el("option", { value: a, ...(a === s.fetch.adapter ? { selected: "" } : {}) }, a)));
+  f.endpoints = el("textarea", { class: "mono" }); f.endpoints.value = s.fetch.endpoints.join("\n");
+  f.license = el("textarea"); f.license.value = s.license || "";
+  f.notes = el("textarea"); f.notes.value = s.notes || "";
+  f.status = el("select", {}, ...["active", "paused", "retired"].map(v =>
+    el("option", { value: v, ...(v === s.status ? { selected: "" } : {}) }, v)));
+
+  // tags editor
+  const tagRows = el("div");
+  const addTagRow = (tag = "", tier = 3) => {
+    const trow = el("div", { class: "field-row", style: "margin-bottom:8px;align-items:center" },
+      el("input", { type: "text", placeholder: "tag e.g. commodities", value: tag, "data-k": "tag" }),
+      el("select", { "data-k": "tier", style: "max-width:110px" },
+        ...[1, 2, 3].map(t => el("option", { value: t, ...(t === Number(tier) ? { selected: "" } : {}) }, "tier " + t))),
+      el("button", { class: "btn small", onclick: () => trow.remove() }, "✕"));
+    tagRows.appendChild(trow);
+  };
+  Object.entries(s.tags).forEach(([tag, p]) => addTagRow(tag, p.tier));
+  if (!Object.keys(s.tags).length) addTagRow();
+
+  const content = el("div", {},
+    input("id", "Source id", s.id, { attrs: existing ? { disabled: "" } : {},
+      help: "Lowercase letters, digits, _ and - only. Cannot change later." }),
+    input("name", "Display name", s.name),
+    el("div", { class: "field-row" },
+      input("homepage", "Homepage", s.homepage),
+      input("language", "Language", s.language, { attrs: { style: "max-width:90px" } })),
+    el("label", { class: "field" }, el("span", {}, "Fetch adapter"), f.adapter,
+      el("span", { class: "help" }, "rss = news feed · http_api = JSON API · local_folder = a folder of your own documents")),
+    el("label", { class: "field" }, el("span", {}, "Endpoints — one per line"), f.endpoints,
+      el("span", { class: "help" }, "Feed URLs, API URLs, or folder paths (for local_folder)." )),
+    el("label", { class: "field" }, el("span", {}, "License / terms (required)"), f.license,
+      el("span", { class: "help" }, "How you're allowed to use this source. Argus only fetches what the license permits — paywalled outlets enter via licensed feeds, never scraping.")),
+    el("label", { class: "field" }, el("span", {}, "Domain tags and tiers"), tagRows,
+      el("button", { class: "btn small", onclick: () => addTagRow() }, "Add tag"),
+      el("span", { class: "help" }, "A source is visible to a domain when it carries one of that domain's tags. Tier Ⅰ can confirm claims; Ⅲ never can alone.")),
+    input("independence_group", "Independence group", s.independence_group || "", {
+      help: "Syndication family — sources sharing a group count as ONE independent voice during corroboration. Leave blank unless this outlet republishes another's copy." }),
+    el("label", { class: "field" }, el("span", {}, "Notes"), f.notes),
+    el("label", { class: "field" }, el("span", {}, "Status"), f.status));
+
+  modal(existing ? "Edit source — " + s.id : "Add source", content, {
+    drawer: true,
+    sub: "Saved to registry/sources.yaml with a backup and a git commit.",
+    footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn primary", onclick: async () => {
+        const tags = {};
+        tagRows.querySelectorAll(".field-row").forEach(r => {
+          const tag = r.querySelector('[data-k="tag"]').value.trim();
+          const tier = Number(r.querySelector('[data-k="tier"]').value);
+          if (tag) tags[tag] = { tier };
+        });
+        const body = { source: {
+          id: existing ? s.id : f.id.value.trim(),
+          name: f.name.value.trim(),
+          homepage: f.homepage.value.trim() || null,
+          language: f.language.value.trim() || "en",
+          fetch: { adapter: f.adapter.value,
+                   endpoints: f.endpoints.value.split("\n").map(x => x.trim()).filter(Boolean) },
+          license: f.license.value.trim(),
+          tags,
+          independence_group: f.independence_group.value.trim() || null,
+          status: f.status.value,
+          notes: f.notes.value.trim() || null,
+        } };
+        try {
+          const r = existing
+            ? await api(`/api/registry/sources/${s.id}`, { method: "PUT", body })
+            : await api("/api/registry/sources", { method: "POST", body });
+          toast("Source saved" + (r.committed ? ` · committed ${r.commit}` : ` · ${r.detail}`), "ok");
+          close(); loadSources(); A.overview(true).then(A.renderStamps);
+        } catch (e) { toast(e.message, "err"); }
+      } }, existing ? "Save changes" : "Add source"),
+    ],
+  });
+}
+
+/* ====================== domains ====================== */
+async function loadDomains() {
+  const data = await api("/api/domains");
+  const host = document.getElementById("tab-domains");
+  host.innerHTML = "";
+  const head = el("div", { class: "card" },
+    el("div", { class: "card-head" },
+      el("h2", {}, "Domains", el("span", { class: "hint" },
+        "a domain = one research beat: scope, vocabulary, trust policy, schedule")),
+      el("div", { class: "spacer" }),
+      el("button", { class: "btn primary", onclick: newDomainModal }, "New domain")));
+  host.appendChild(head);
+
+  for (const d of data.domains) {
+    if (d.error) {
+      host.appendChild(el("div", { class: "card" },
+        el("h2", {}, d.name), el("div", { class: "banner bad" }, d.error)));
+      continue;
+    }
+    const p = d.profile;
+    const cor = p.corroboration;
+    const card = el("div", { class: "card" },
+      el("div", { class: "card-head" },
+        el("h2", {}, d.name.replace(/_/g, " ")),
+        el("div", { class: "spacer" }),
+        el("button", { class: "btn small", onclick: () => entitiesDrawer(d.name) }, "Vocabulary"),
+        el("button", { class: "btn small primary", onclick: () => profileDrawer(d) }, "Edit profile")),
+      p.description ? el("p", { class: "note", style: "margin-top:-6px" }, p.description) : null,
+      el("div", { class: "kv" },
+        el("b", {}, "Scope"), el("span", {},
+          p.registry_scope.include_tags.map(t => el("span", { class: "tagchip" }, t)),
+          ` · min tier ${p.registry_scope.min_tier} · ${ (d.sources_in_scope||[]).length } sources: `,
+          el("span", { class: "mono" }, (d.sources_in_scope || []).join(", ") || "none — add matching tags to sources")),
+        el("b", {}, "Trust policy"), el("span", {},
+          `events need ${cor.event.min_sources} independent sources (≥${cor.event.min_tier1} tier Ⅰ), ` +
+          `independence by ${cor.event.independence.replace("_", " ")}; below threshold → ${cor.fallback}`),
+        el("b", {}, "Brief"), el("span", {},
+          `${p.retrieval.brief_window_hours} h window · top ${p.retrieval.top_k} · `),
+      ));
+    // append cron chip cleanly
+    const briefSpan = card.querySelector(".kv").lastElementChild;
+    briefSpan.appendChild(p.schedule.brief_cron
+      ? el("span", { class: "mono" }, "cron " + p.schedule.brief_cron)
+      : el("span", { class: "note" }, "no schedule"));
+    host.appendChild(card);
+  }
+}
+
+function newDomainModal() {
+  const name = el("input", { type: "text", placeholder: "e.g. auto_parts" });
+  const desc = el("input", { type: "text", placeholder: "What this beat covers" });
+  const tags = el("input", { type: "text", placeholder: "e.g. automotive, macro" });
+  const tier = el("select", {}, ...[3, 2, 1].map(t =>
+    el("option", { value: t }, `include down to tier ${t}`)));
+  const cron = el("input", { type: "text", class: "mono", placeholder: "30 05 * * *  (optional)" });
+  modal("New domain", el("div", {},
+    el("label", { class: "field" }, el("span", {}, "Name (lowercase, _ allowed)"), name),
+    el("label", { class: "field" }, el("span", {}, "Description"), desc),
+    el("label", { class: "field" }, el("span", {}, "Registry tags to include (comma-separated)"), tags,
+      el("span", { class: "help" }, "Sources carrying any of these tags are in scope.")),
+    el("label", { class: "field" }, el("span", {}, "Tier floor"), tier),
+    el("label", { class: "field" }, el("span", {}, "Daily brief schedule (cron)"), cron,
+      el("span", { class: "help" }, "minute hour day month weekday — e.g. 30 05 * * * runs daily at 05:30. Leave blank for manual runs only."))),
+    { footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn primary", onclick: async () => {
+        try {
+          const r = await api("/api/domains", { method: "POST", body: {
+            name: name.value.trim(), description: desc.value.trim(),
+            include_tags: tags.value.split(",").map(x => x.trim()).filter(Boolean),
+            min_tier: Number(tier.value),
+            brief_cron: cron.value.trim() || null } });
+          toast("Domain created" + (r.committed ? ` · committed ${r.commit}` : ""), "ok");
+          close(); loadDomains(); A.overview(true).then(A.renderStamps);
+        } catch (e) { toast(e.message, "err"); }
+      } }, "Create domain")] });
+}
+
+function profileDrawer(d) {
+  const p = JSON.parse(JSON.stringify(d.profile));
+  const F = {};
+  const num = (v, attrs = {}) => el("input", { type: "number", value: v, ...attrs });
+  F.description = el("input", { type: "text", value: p.description || "" });
+  F.tags = el("input", { type: "text", value: p.registry_scope.include_tags.join(", ") });
+  F.min_tier = el("select", {}, ...[1, 2, 3].map(t =>
+    el("option", { value: t, ...(t === p.registry_scope.min_tier ? { selected: "" } : {}) }, "tier " + t)));
+  F.window = num(p.retrieval.brief_window_hours, { min: 1 });
+  F.top_k = num(p.retrieval.top_k, { min: 1 });
+  F.max_iter = num(p.retrieval.max_iterations, { min: 1 });
+  F.cron = el("input", { type: "text", class: "mono", value: p.schedule.brief_cron || "" });
+  F.ev_min = num(p.corroboration.event.min_sources, { min: 1 });
+  F.ev_t1 = num(p.corroboration.event.min_tier1, { min: 0 });
+  F.ev_ind = el("select", {}, ...["story_cluster", "independence_group"].map(v =>
+    el("option", { value: v, ...(v === p.corroboration.event.independence ? { selected: "" } : {}) }, v.replace("_", " "))));
+  F.fallback = el("select", {}, ...["attribute", "flag", "drop"].map(v =>
+    el("option", { value: v, ...(v === p.corroboration.fallback ? { selected: "" } : {}) }, v)));
+  F.schema_event = el("input", { type: "checkbox", ...(p.claims.schemas.includes("event") ? { checked: "" } : {}) });
+  F.schema_quant = el("input", { type: "checkbox", ...(p.claims.schemas.includes("quantitative") ? { checked: "" } : {}) });
+  F.q_tol = el("input", { type: "number", step: "0.001", min: 0,
+    value: p.claims.quantitative.tolerance.relative ?? "" });
+
+  const content = el("div", {},
+    el("label", { class: "field" }, el("span", {}, "Description"), F.description),
+    el("label", { class: "field" }, el("span", {}, "Registry tags (comma-separated)"), F.tags),
+    el("div", { class: "field-row" },
+      el("label", { class: "field" }, el("span", {}, "Tier floor"), F.min_tier,
+        el("span", { class: "help" }, "Ignore sources below this tier for this domain.")),
+      el("label", { class: "field" }, el("span", {}, "Brief window (hours)"), F.window)),
+    el("div", { class: "field-row" },
+      el("label", { class: "field" }, el("span", {}, "Retrieval top-k"), F.top_k),
+      el("label", { class: "field" }, el("span", {}, "Research loop cap"), F.max_iter)),
+    el("label", { class: "field" }, el("span", {}, "Daily brief schedule (cron)"), F.cron,
+      el("span", { class: "help" }, "e.g. 30 05 * * * = daily 05:30. Blank = manual only. Turn the schedule on/off in Maintenance → Schedules.")),
+    el("h3", { style: "font-size:14px;margin:18px 0 8px;color:var(--muted)" }, "TRUST POLICY"),
+    el("div", { class: "field-row" },
+      el("label", { class: "field" }, el("span", {}, "Min independent sources (events)"), F.ev_min),
+      el("label", { class: "field" }, el("span", {}, "Of which tier Ⅰ"), F.ev_t1)),
+    el("label", { class: "field" }, el("span", {}, "Independence rule"), F.ev_ind,
+      el("span", { class: "help" }, "story cluster = syndicated near-duplicates count once · independence group = registry-declared families count once.")),
+    el("label", { class: "field" }, el("span", {}, "Below-threshold claims"), F.fallback,
+      el("span", { class: "help" }, "attribute = publish labeled “reported by X, unconfirmed” (recommended) · flag = mark loudly · drop = omit.")),
+    el("label", { class: "field" }, el("span", {}, "Claim types"),
+      el("div", { class: "btn-row" },
+        el("label", {}, F.schema_event, " events"),
+        el("label", {}, F.schema_quant, " quantitative (prices, rates, figures)"))),
+    el("label", { class: "field" }, el("span", {}, "Quantitative tolerance (relative)"), F.q_tol,
+      el("span", { class: "help" }, "0.005 = values within 0.5% corroborate each other.")));
+
+  modal("Edit profile — " + d.name, content, {
+    drawer: true, sub: "Saved to domains/" + d.name + "/profile.yaml with a backup and a git commit.",
+    footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn primary", onclick: async () => {
+        p.description = F.description.value.trim();
+        p.registry_scope.include_tags = F.tags.value.split(",").map(x => x.trim()).filter(Boolean);
+        p.registry_scope.min_tier = Number(F.min_tier.value);
+        p.retrieval.brief_window_hours = Number(F.window.value);
+        p.retrieval.top_k = Number(F.top_k.value);
+        p.retrieval.max_iterations = Number(F.max_iter.value);
+        p.schedule.brief_cron = F.cron.value.trim() || null;
+        p.corroboration.event.min_sources = Number(F.ev_min.value);
+        p.corroboration.event.min_tier1 = Number(F.ev_t1.value);
+        p.corroboration.event.independence = F.ev_ind.value;
+        p.corroboration.fallback = F.fallback.value;
+        p.claims.schemas = [
+          ...(F.schema_event.checked ? ["event"] : []),
+          ...(F.schema_quant.checked ? ["quantitative"] : [])];
+        p.claims.quantitative.tolerance.relative = F.q_tol.value === "" ? null : Number(F.q_tol.value);
+        try {
+          const r = await api(`/api/domains/${d.name}`, { method: "PUT", body: { profile: p } });
+          toast("Profile saved" + (r.committed ? ` · committed ${r.commit}` : ""), "ok");
+          close(); loadDomains(); A.overview(true).then(A.renderStamps);
+        } catch (e) { toast(e.message, "err"); }
+      } }, "Save profile")] });
+}
+
+async function entitiesDrawer(domain) {
+  const data = await api(`/api/domains/${domain}/entities`);
+  if (!data.dictionaries.length)
+    return toast("This domain declares no entity dictionaries in its profile.", "err");
+  const dict = data.dictionaries[0];
+  const rowsHost = el("div");
+  const addRow = (r = {}) => rowsHost.appendChild(
+    el("div", { class: "field-row", style: "margin-bottom:8px" },
+      el("input", { type: "text", placeholder: "surface form e.g. WTI", value: r.surface_form || "", "data-k": "surface_form" }),
+      el("input", { type: "text", class: "mono", placeholder: "canonical id e.g. CMD:WTI", value: r.canonical_id || "", "data-k": "canonical_id" }),
+      el("input", { type: "text", placeholder: "type", value: r.type || "", "data-k": "type", style: "max-width:120px" }),
+      el("button", { class: "btn small", onclick: (e) => e.target.closest(".field-row").remove() }, "✕")));
+  dict.rows.forEach(addRow);
+  if (!dict.rows.length) addRow();
+  const content = el("div", {},
+    el("p", { class: "note" },
+      "The vocabulary that tags documents at ingestion and expands search queries — " +
+      "tickers, part numbers, place names, ministry names. Several surface forms can point " +
+      "to one canonical id (WTI ⇄ West Texas Intermediate). Applied to newly ingested documents."),
+    rowsHost,
+    el("button", { class: "btn small", onclick: () => addRow() }, "Add term"));
+  modal("Vocabulary — " + domain, content, {
+    drawer: true, sub: dict.path,
+    footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn primary", onclick: async () => {
+        const rows = [...rowsHost.querySelectorAll(".field-row")].map(r => ({
+          surface_form: r.querySelector('[data-k="surface_form"]').value,
+          canonical_id: r.querySelector('[data-k="canonical_id"]').value,
+          type: r.querySelector('[data-k="type"]').value }));
+        try {
+          const r = await api(`/api/domains/${domain}/entities`,
+            { method: "PUT", body: { path: dict.path, rows } });
+          toast("Vocabulary saved" + (r.committed ? ` · committed ${r.commit}` : ""), "ok");
+          close();
+        } catch (e) { toast(e.message, "err"); }
+      } }, "Save vocabulary")] });
+}
+
+/* ====================== candidates ====================== */
+async function loadCandidates() {
+  const host = document.getElementById("tab-candidates");
+  const [pending, reg] = await Promise.all([
+    api("/api/candidates?status=pending"), REG ? Promise.resolve(REG) : api("/api/registry")]);
+  REG = reg;
+  document.getElementById("cand-n").textContent = pending.length || "";
+  host.innerHTML = "";
+  const card = el("div", { class: "card" },
+    el("h2", {}, "Candidate sources",
+      el("span", { class: "hint" }, "found during research, waiting for your decision")),
+    el("p", { class: "note", style: "margin-top:-6px" },
+      "Deep research can notice promising off-registry outlets. They are never fetched or cited — " +
+      "they wait here. Approving adds a paused entry; you fill in the real feed URL and license, " +
+      "then activate it on the Sources tab. Rejected domains are never proposed again."));
+  if (!pending.length) {
+    card.appendChild(el("div", { class: "empty" },
+      el("h3", {}, "Queue is clear"),
+      el("p", {}, "New proposals appear here after deep-research runs with discovery enabled.")));
+    host.appendChild(card); return;
+  }
+  const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+    ...["Proposed source", "Why", "From run", ""].map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const c of pending) {
+    tb.appendChild(el("tr", {},
+      el("td", {}, el("div", {}, c.title || c.netloc), el("div", { class: "mono" }, c.netloc)),
+      el("td", {}, el("span", { class: "note" }, c.rationale || "—")),
+      el("td", { class: "mono" }, c.run_id || "—"),
+      el("td", { style: "text-align:right;white-space:nowrap" },
+        el("button", { class: "btn small primary", onclick: () => approveModal(c) }, "Approve"), " ",
+        el("button", { class: "btn small danger", onclick: () => rejectModal(c) }, "Reject"))));
+  }
+  tbl.appendChild(tb); card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  host.appendChild(card);
+}
+
+function approveModal(c) {
+  const add = el("input", { type: "checkbox", checked: "" });
+  const tag = el("select", {}, ...REG.tags.map(t => el("option", { value: t }, t)));
+  const tier = el("select", {}, ...[3, 2, 1].map(t => el("option", { value: t }, "tier " + t)));
+  modal("Approve — " + c.netloc, el("div", {},
+    el("p", { class: "note" }, c.rationale || ""),
+    el("label", { class: "field" }, el("div", { class: "btn-row" }, add,
+      el("span", {}, "Add to registry now as a paused source")),
+      el("span", { class: "help" }, "Paused = never fetched. Fill in the real feed URL and the license on the Sources tab, then activate.")),
+    el("div", { class: "field-row" },
+      el("label", { class: "field" }, el("span", {}, "Domain tag"), tag),
+      el("label", { class: "field" }, el("span", {}, "Starting tier"), tier,
+        el("span", { class: "help" }, "Start supplementary (Ⅲ); promote deliberately.")))),
+    { footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn primary", onclick: async () => {
+        try {
+          const r = await api(`/api/candidates/${c.id}/approve`, { method: "POST",
+            body: { add_to_registry: add.checked, tag: tag.value, tier: Number(tier.value) } });
+          close();
+          if (r.added_to_registry) {
+            toast(`Approved · added '${r.source_id}' as paused`, "ok");
+          } else {
+            modal("Registry stanza — paste & commit", el("pre", { class: "json" }, r.stanza),
+              { sub: "Approved without auto-adding. Paste this into registry/sources.yaml, fill the gaps, and commit." });
+          }
+          loadCandidates(); if (r.added_to_registry) loadSources();
+        } catch (e) { toast(e.message, "err"); }
+      } }, "Approve")] });
+}
+
+function rejectModal(c) {
+  const reason = el("input", { type: "text", placeholder: "e.g. aggregator, no original reporting" });
+  modal("Reject — " + c.netloc, el("div", {},
+    el("label", { class: "field" }, el("span", {}, "Reason (recorded; never re-proposed)"), reason)),
+    { footer: (close) => [
+      el("button", { class: "btn", onclick: close }, "Cancel"),
+      el("button", { class: "btn danger", onclick: async () => {
+        try {
+          await api(`/api/candidates/${c.id}/reject`, { method: "POST",
+            body: { reason: reason.value.trim() || "rejected" } });
+          toast("Rejected " + c.netloc, "ok"); close(); loadCandidates();
+        } catch (e) { toast(e.message, "err"); }
+      } }, "Reject source")] });
+}
+
+/* ====================== settings ====================== */
+async function loadSettings() {
+  const host = document.getElementById("tab-settings");
+  const data = await api("/api/settings");
+  host.innerHTML = "";
+  if (data.restart_pending.length)
+    host.appendChild(el("div", { class: "banner bad" },
+      "Restart required for: " + data.restart_pending.join(", ") +
+      ". Stop and start argus-web to apply."));
+  const groups = { engine: "Engine", azure: "Azure OpenAI", tuning: "Run tuning",
+                   storage: "Storage", webapp: "Web access" };
+  const groupIntro = {
+    engine: "What powers synthesis and search. Stub/hashing run fully offline for trying things out; azure is production.",
+    azure: "Credentials and deployments used when the engine is set to azure. Deployment names and api version are pinned into every run manifest.",
+    tuning: "Caps and knobs; take effect on the next run.",
+    storage: "Where snapshots, the index, and the database live. These are bound at startup.",
+    webapp: "Access to these pages." };
+  const inputs = {};
+  for (const [g, title] of Object.entries(groups)) {
+    const fields = data.fields.filter(f => f.group === g);
+    if (!fields.length) continue;
+    const card = el("div", { class: "card" }, el("h2", {}, title),
+      el("p", { class: "note", style: "margin-top:-6px" }, groupIntro[g] || ""));
+    for (const f of fields) {
+      let inp;
+      if (f.kind.startsWith("choice:")) {
+        const opts = f.kind.split(":")[1].split(",");
+        inp = el("select", {}, ...opts.map(o =>
+          el("option", { value: o, ...(o === f.value ? { selected: "" } : {}) }, o)));
+      } else if (f.secret) {
+        inp = el("input", { type: "password",
+          placeholder: f.set ? "•••••• (set — leave blank to keep)" : "not set" });
+      } else {
+        inp = el("input", { type: f.kind === "int" ? "number" : "text", value: f.value ?? "" });
+        if (!f.value && f.default) inp.placeholder = "default: " + f.default;
+      }
+      inputs[f.key] = { inp, f };
+      const label = el("label", { class: "field" },
+        el("span", {}, f.label,
+          f.restart_required ? " · restart required" : "",
+          f.overridden ? el("span", { class: "badge dim", style: "margin-left:8px" }, "overridden") : ""),
+        inp, el("span", { class: "help" }, f.help));
+      if (f.secret && f.set) {
+        const clear = el("input", { type: "checkbox" });
+        inputs[f.key].clear = clear;
+        label.appendChild(el("span", { class: "help" }, clear, " clear this value"));
+      }
+      card.appendChild(label);
+    }
+    host.appendChild(card);
+  }
+  const save = el("button", { class: "btn primary", onclick: async () => {
+    const changes = {};
+    for (const [key, { inp, f, clear }] of Object.entries(inputs)) {
+      if (f.secret) {
+        if (clear && clear.checked) changes[key] = null;
+        else if (inp.value) changes[key] = inp.value;
+      } else {
+        const current = f.value ?? "";
+        if (inp.value !== current) changes[key] = inp.value === "" ? null : inp.value;
+      }
+    }
+    if (!Object.keys(changes).length) return toast("Nothing changed.");
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: { changes } });
+      toast("Settings saved" + (r.restart_required.length
+        ? " — restart required for " + r.restart_required.join(", ") : ""),
+        r.restart_required.length ? "err" : "ok");
+      loadSettings(); A.overview(true).then(A.renderStamps);
+    } catch (e) { toast(e.message, "err"); }
+  } }, "Save settings");
+  host.appendChild(el("div", { class: "card" },
+    el("div", { class: "btn-row" }, save,
+      el("span", { class: "note" }, "Saved to " + data.overrides_file +
+        " and applied to the running server. Environment variables set in your shell are overridden by values saved here."))));
+}
+
+/* ====================== boot ====================== */
+A.masthead("admin");
+A.authCheck();
+loadSources().catch(e => toast(e.message, "err"));
+loadDomains().catch(e => toast(e.message, "err"));
+loadCandidates().catch(e => toast(e.message, "err"));
+loadSettings().catch(e => toast(e.message, "err"));
+openHashTab();
+</script>
+</body>
+</html>

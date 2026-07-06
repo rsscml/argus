@@ -1,0 +1,88 @@
+# Argus source registry — trust policy (architecture SS6.1).
+# Every change to this file is a reviewed git commit; the commit hash is
+# recorded in every fetch event and (from M3) every run manifest.
+sources:
+  - id: un_news
+    name: UN News
+    homepage: https://news.un.org
+    language: en
+    fetch:
+      adapter: rss
+      endpoints:
+        - https://news.un.org/feed/subscribe/en/news/all/rss.xml
+    license: "Official UN news service; public RSS for research use. Full text not fetched."
+    tags:
+      general_news: { tier: 1 }     # primary/official
+    status: active
+    added: 2026-07-05
+
+  - id: bbc_world
+    name: BBC News — World
+    homepage: https://www.bbc.com/news/world
+    language: en
+    fetch:
+      adapter: rss
+      endpoints:
+        - https://feeds.bbci.co.uk/news/world/rss.xml
+    license: "Headlines and summaries via public RSS for personal/research use. Full text not fetched."
+    tags:
+      general_news: { tier: 2 }
+    status: active
+    added: 2026-07-05
+
+  - id: al_jazeera_en
+    name: Al Jazeera English
+    homepage: https://www.aljazeera.com
+    language: en
+    fetch:
+      adapter: rss
+      endpoints:
+        - https://www.aljazeera.com/xml/rss/all.xml
+    license: "Headlines and summaries via public RSS for personal/research use. Full text not fetched."
+    tags:
+      general_news: { tier: 2 }
+      commodities:  { tier: 3 }   # per-tag tiering (SS5.2): supplementary here
+    status: active
+    added: 2026-07-05
+
+  - id: opec_press
+    name: OPEC press releases
+    homepage: https://www.opec.org
+    language: en
+    fetch:
+      adapter: rss
+      endpoints:
+        - https://www.opec.org/opec_web/en/pressreleases.rss
+    license: "Official press releases; public RSS for research use."
+    tags:
+      commodities: { tier: 1 }    # primary/official for this domain
+    status: active
+    added: 2026-07-05
+
+  - id: gulf_energy_monitor
+    name: Gulf Energy Monitor (example trade press)
+    homepage: https://gulfenergymonitor.example
+    language: en
+    fetch:
+      adapter: rss
+      endpoints:
+        - https://gulfenergymonitor.example/feed.xml
+    license: "Placeholder trade-press entry — replace with your licensed feed."
+    tags:
+      commodities: { tier: 2 }
+    status: paused                # activate once the real feed + license are set
+    added: 2026-07-05
+
+  - id: local_demo
+    name: Local curated corpus (demo)
+    fetch:
+      adapter: local_folder
+      endpoints:
+        - corpora/demo
+    license: "Operator-owned material."
+    tags:
+      general_news: { tier: 1 }
+      commodities:  { tier: 1 }   # your curated corpus is Tier 1 here too
+    independence_group: local
+    status: active
+    added: 2026-07-05

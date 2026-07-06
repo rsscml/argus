@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus — Research desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="mast"></header>
+
+<div class="wrap">
+  <div class="grid">
+    <!-- ============ left: the brief ============ -->
+    <section>
+      <div class="card">
+        <div class="card-head">
+          <div class="pills" id="domain-pills"></div>
+          <div class="spacer"></div>
+          <select id="window-select" style="width:auto" title="Look-back window for this run">
+            <option value="">Profile window</option>
+            <option value="6">Last 6 h</option>
+            <option value="24">Last 24 h</option>
+            <option value="72">Last 3 days</option>
+            <option value="168">Last 7 days</option>
+          </select>
+          <button class="btn primary" id="run-brief">Run brief now</button>
+        </div>
+        <div id="brief-status" class="note" style="margin-bottom:10px"></div>
+        <div id="article-host"></div>
+      </div>
+    </section>
+
+    <!-- ============ right rail ============ -->
+    <aside>
+      <div class="card">
+        <h2>Ask the archive</h2>
+        <p class="note" style="margin-top:-6px">Deep research over your approved
+          sources and local corpus only — every sentence in the report cites an
+          immutable snapshot.</p>
+        <label class="field"><span>Question</span>
+          <textarea id="research-q" placeholder="e.g. What has moved tanker traffic through Hormuz this month, and who reported it?"></textarea>
+        </label>
+        <div class="btn-row">
+          <button class="btn primary" id="run-research">Run deep research</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Recent runs</h2><div class="spacer"></div>
+          <a href="/maintenance#runs" class="note">All runs →</a></div>
+        <div id="recent-runs"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Source health</h2><div class="spacer"></div>
+          <a href="/maintenance#health" class="note">Details →</a></div>
+        <div id="health-mini"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const { api, el, toast, fmtTime, ago, statusBadge, watchJob } = A;
+let DOMAIN = null, DOMAINS = [];
+
+async function boot() {
+  A.masthead("home");
+  A.authCheck();
+  const ov = await A.overview();
+  DOMAINS = ov.domains;
+  if (!DOMAINS.length) return renderNoDomains();
+  DOMAIN = localStorage.getItem("argus.domain");
+  if (!DOMAINS.some(d => d.name === DOMAIN)) DOMAIN = DOMAINS[0].name;
+  renderPills();
+  renderHealthMini(ov.health);
+  await Promise.all([loadBrief(), loadRecentRuns()]);
+}
+
+function renderNoDomains() {
+  document.getElementById("article-host").appendChild(
+    el("div", { class: "empty" },
+      el("h3", {}, "No domains yet"),
+      el("p", {}, "A domain is a research beat: its sources, vocabulary, and trust policy."),
+      el("a", { class: "btn primary", href: "/admin#domains" }, "Set up a domain")));
+}
+
+function renderPills() {
+  const host = document.getElementById("domain-pills");
+  host.innerHTML = "";
+  for (const d of DOMAINS) {
+    host.appendChild(el("button", {
+      class: "pill" + (d.name === DOMAIN ? " active" : ""),
+      title: d.description || d.name,
+      onclick: () => { DOMAIN = d.name; localStorage.setItem("argus.domain", d.name);
+                       renderPills(); loadBrief(); },
+    }, d.name.replace(/_/g, " ")));
+  }
+}
+
+function metaLine(run) {
+  return el("div", { class: "article-meta" },
+    el("span", {}, "run " + run.run_id),
+    el("span", {}, (run.workload || "").replace("_", " ")),
+    el("span", {}, fmtTime(run.started_at)),
+    run.registry_commit ? el("span", {}, "registry " + A.short(run.registry_commit, 7)) : null);
+}
+
+async function loadBrief() {
+  const host = document.getElementById("article-host");
+  const status = document.getElementById("brief-status");
+  host.innerHTML = ""; status.textContent = "";
+  const runs = await api(`/api/runs?domain=${DOMAIN}&workload=daily_brief&limit=8`);
+  const done = runs.find(r => r.status === "done" && r.output_path);
+  const dinfo = DOMAINS.find(d => d.name === DOMAIN) || {};
+  const schedNote = dinfo.schedule_enabled && dinfo.next_run
+    ? `Next scheduled run ${fmtTime(dinfo.next_run)}.`
+    : "Schedule is off — briefs run when you press the button.";
+  if (!done) {
+    status.textContent = schedNote;
+    host.appendChild(el("div", { class: "empty" },
+      el("h3", {}, "No brief yet for " + DOMAIN.replace(/_/g, " ")),
+      el("p", {}, "Run one now — Argus will poll your approved sources, ingest what's new, and write a cited brief."),
+      el("button", { class: "btn primary", onclick: runBrief }, "Run brief now")));
+    return;
+  }
+  status.textContent = `Latest brief ${ago(done.started_at)}. ${schedNote}`;
+  await showOutput(done);
+}
+
+async function showOutput(run) {
+  const host = document.getElementById("article-host");
+  host.innerHTML = "";
+  try {
+    const out = await api(`/api/runs/${run.run_id}/output`);
+    const art = el("article", { class: "article fade-in" });
+    art.appendChild(metaLine(run));
+    const body = el("div"); body.innerHTML = out.html;
+    art.appendChild(body);
+    host.appendChild(art);
+  } catch (e) {
+    host.appendChild(el("div", { class: "empty" },
+      el("h3", {}, "Output unavailable"), el("p", {}, e.message)));
+  }
+}
+
+async function runBrief() {
+  const win = document.getElementById("window-select").value;
+  const btn = document.getElementById("run-brief");
+  btn.disabled = true;
+  try {
+    const { job_id } = await api("/api/actions/brief", { method: "POST",
+      body: { domain: DOMAIN, window_hours: win ? Number(win) : null } });
+    watchJob(job_id, { title: "Daily brief — " + DOMAIN,
+      onDone: () => { loadBrief(); loadRecentRuns(); },
+      onFail: () => { btn.disabled = false; loadRecentRuns(); } });
+    toast("Brief queued — it will appear here when it's ready.");
+  } catch (e) { toast(e.message, "err"); }
+  finally { setTimeout(() => btn.disabled = false, 2500); }
+}
+
+async function runResearch() {
+  const q = document.getElementById("research-q").value.trim();
+  if (q.length < 3) return toast("Type a research question first.", "err");
+  try {
+    const { job_id } = await api("/api/actions/research", { method: "POST",
+      body: { domain: DOMAIN, question: q } });
+    watchJob(job_id, { title: "Deep research — " + DOMAIN,
+      onDone: async (job) => {
+        loadRecentRuns();
+        const runId = job.result && job.result.run_id;
+        if (runId) {
+          const detail = await api("/api/runs/" + runId);
+          document.getElementById("brief-status").textContent =
+            "Showing your research report. Pick a domain pill to return to the brief.";
+          showOutput(detail.run);
+        }
+      } });
+    toast("Research queued — the report will open here when done.");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadRecentRuns() {
+  const host = document.getElementById("recent-runs");
+  const runs = await api("/api/runs?limit=8");
+  host.innerHTML = "";
+  if (!runs.length) {
+    host.appendChild(el("p", { class: "note" }, "Nothing has run yet."));
+    return;
+  }
+  const tbl = el("table", { class: "tbl" });
+  for (const r of runs) {
+    const row = el("tr", { class: r.output_path ? "click" : "" },
+      el("td", {}, el("div", {}, r.domain.replace(/_/g, " ")),
+        el("div", { class: "mono" }, r.workload.replace("_", " ") + " · " + ago(r.started_at))),
+      el("td", { style: "text-align:right" }, statusBadge(r.status)));
+    if (r.output_path) row.addEventListener("click", () => {
+      document.getElementById("brief-status").textContent =
+        "Showing a past run. Pick a domain pill to return to the latest brief.";
+      showOutput(r);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    tbl.appendChild(row);
+  }
+  host.appendChild(tbl);
+}
+
+function renderHealthMini(health) {
+  const host = document.getElementById("health-mini");
+  host.innerHTML = "";
+  const order = [["ok", "good"], ["degraded", "warn"], ["failing", "bad"], ["unknown", "dim"]];
+  const row = el("div", { class: "btn-row" });
+  let any = false;
+  for (const [k, cls] of order) {
+    if (health[k]) { any = true;
+      row.appendChild(el("span", { class: "badge " + cls }, `${health[k]} ${k}`)); }
+  }
+  host.appendChild(any ? row :
+    el("p", { class: "note" }, "No polls in the last 24 h — health appears after the first run."));
+}
+
+document.getElementById("run-brief").addEventListener("click", runBrief);
+document.getElementById("run-research").addEventListener("click", runResearch);
+boot().catch(e => toast(e.message, "err"));
+</script>
+</body>
+</html>

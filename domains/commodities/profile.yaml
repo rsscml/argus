@@ -1,0 +1,33 @@
+# Commodities domain profile (architecture SS5.1) — the M6 acceptance artifact:
+# onboarding this domain touches ONLY configuration, zero engine code (G5).
+domain: commodities
+description: Global commodities — energy, freight, softs — with Gulf focus.
+
+registry_scope:
+  include_tags: [commodities]
+  min_tier: 3
+
+entities:
+  dictionaries:
+    - path: entities/commodities.csv
+
+claims:
+  schemas: [event, quantitative]
+  quantitative:
+    unit_normalization: true
+    tolerance:
+      relative: 0.005          # price prints within 0.5% corroborate
+
+corroboration:
+  event:        { min_sources: 2, min_tier1: 1, independence: story_cluster }
+  quantitative: { min_sources: 2, min_tier1: 1, value_tolerance: inherit }
+  fallback: attribute          # thin trade-press coverage degrades to labeled
+                               # attribution, never silence (R4)
+
+retrieval:
+  brief_window_hours: 24
+  top_k: 24
+  max_iterations: 3
+
+schedule:
+  brief_cron: "00 06 * * *"

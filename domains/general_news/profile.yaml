@@ -1,0 +1,30 @@
+# Domain profile (architecture SS5.1). The engine is domain-agnostic; this
+# file is everything that makes "general news" a domain.
+domain: general_news
+description: General world-news monitoring.
+
+registry_scope:
+  include_tags: [general_news]
+  min_tier: 3
+
+entities:
+  dictionaries:
+    - path: entities/entities.csv
+
+claims:
+  schemas: [event, quantitative]
+  quantitative:
+    unit_normalization: true
+    tolerance:
+      relative: 0.005
+
+corroboration:
+  event: { min_sources: 2, min_tier1: 1, independence: story_cluster }
+  fallback: attribute
+
+retrieval:
+  brief_window_hours: 24
+  top_k: 24
+
+schedule:
+  brief_cron: "30 05 * * *"

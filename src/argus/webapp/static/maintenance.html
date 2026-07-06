@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus — Maintenance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="mast"></header>
+
+<div class="wrap">
+  <h1 class="page-title">Maintenance</h1>
+  <p class="page-sub">Keep the desk healthy: watch every source's pulse, control
+    the schedules, audit and replay past runs, browse the immutable snapshot
+    archive, and run data actions by hand.</p>
+
+  <div class="tabs" id="tabs">
+    <button data-t="health" class="active">Health</button>
+    <button data-t="schedules">Schedules</button>
+    <button data-t="runs">Runs</button>
+    <button data-t="snapshots">Snapshots</button>
+    <button data-t="actions">Data actions</button>
+    <button data-t="jobs">Jobs</button>
+  </div>
+
+  <section id="tab-health"></section>
+  <section id="tab-schedules" hidden></section>
+  <section id="tab-runs" hidden></section>
+  <section id="tab-snapshots" hidden></section>
+  <section id="tab-actions" hidden></section>
+  <section id="tab-jobs" hidden></section>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const { api, el, toast, modal, statusBadge, fmtTime, ago, watchJob } = A;
+let DOMAINS = [];
+
+const tabs = document.getElementById("tabs");
+const loaders = { health: loadHealth, schedules: loadSchedules, runs: loadRuns,
+                  snapshots: loadSnapshots, actions: loadActions, jobs: loadJobs };
+tabs.addEventListener("click", (e) => {
+  const btn = e.target.closest("button"); if (!btn) return;
+  tabs.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+  for (const t of Object.keys(loaders))
+    document.getElementById("tab-" + t).hidden = btn.dataset.t !== t;
+  location.hash = btn.dataset.t;
+  loaders[btn.dataset.t]().catch(err => toast(err.message, "err"));
+});
+
+/* ================= health ================= */
+async function loadHealth(windowHours = 24) {
+  const host = document.getElementById("tab-health");
+  const data = await api(`/api/health?window_hours=${windowHours}`);
+  host.innerHTML = "";
+  const sel = el("select", { style: "width:auto", onchange: (e) => loadHealth(Number(e.target.value)) },
+    ...[[24, "last 24 h"], [72, "last 3 days"], [168, "last 7 days"]].map(([v, l]) =>
+      el("option", { value: v, ...(v === windowHours ? { selected: "" } : {}) }, l)));
+  const card = el("div", { class: "card" },
+    el("div", { class: "card-head" },
+      el("h2", {}, "Source health"), el("div", { class: "spacer" }), sel));
+  const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+    ...["Source", "Pulse", "Last success", "Consecutive failures", "Polls", "Items", "New", "Last error"]
+      .map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const h of data.sources) {
+    const cls = { ok: "good", degraded: "warn", failing: "bad", unknown: "" }[h.status] || "";
+    tb.appendChild(el("tr", {},
+      el("td", {}, el("div", {}, h.source_id),
+        h.status_by_registry !== "active"
+          ? el("div", {}, statusBadge(h.status_by_registry)) : null),
+      el("td", {}, el("span", { class: "dot " + cls }), h.status),
+      el("td", {}, h.last_ok_at ? ago(h.last_ok_at) : "never"),
+      el("td", {}, String(h.consecutive_failures)),
+      el("td", {}, String(h.events_in_window)),
+      el("td", {}, String(h.items_in_window)),
+      el("td", {}, String(h.new_in_window)),
+      el("td", {}, el("span", { class: "note", title: h.last_error || "" },
+        A.short(h.last_error, 70)))));
+  }
+  tbl.appendChild(tb);
+  card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  card.appendChild(el("p", { class: "note", style: "margin-top:10px" },
+    "A healthy source succeeded on its last poll. Degraded = 1–2 failures in a row; " +
+    "failing = 3+. A source whose “new” count sits at zero for days usually means the feed " +
+    "changed or the site was redesigned — open Admin → Sources to check its endpoint. " +
+    "One failing source never blocks a run; briefs list unavailable sources instead."));
+  host.appendChild(card);
+}
+
+/* ================= schedules ================= */
+async function loadSchedules() {
+  const host = document.getElementById("tab-schedules");
+  const data = await api("/api/scheduler");
+  host.innerHTML = "";
+  const card = el("div", { class: "card" },
+    el("h2", {}, "Brief schedules",
+      el("span", { class: "hint" }, "cron per domain, from each profile")));
+  const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+    ...["Domain", "Cron", "On", "Next run", "Last scheduled outcome"].map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const d of data.domains) {
+    const sw = el("label", { class: "switch" },
+      el("input", { type: "checkbox", ...(d.enabled ? { checked: "" } : {}),
+        onchange: async (e) => {
+          try {
+            await api(`/api/scheduler/${d.domain}`, { method: "POST",
+              body: { enabled: e.target.checked } });
+            toast(`Schedule for ${d.domain} turned ${e.target.checked ? "on" : "off"}`, "ok");
+            loadSchedules();
+          } catch (err) { toast(err.message, "err"); e.target.checked = !e.target.checked; }
+        } }),
+      el("span", { class: "track" }));
+    let last = "—";
+    if (d.last) {
+      last = `${d.last.outcome}${d.last.run_id ? " · run " + d.last.run_id : ""}` +
+             `${d.last.detail ? " · " + d.last.detail : ""} (${ago(d.last.fired_at)})`;
+    }
+    tb.appendChild(el("tr", {},
+      el("td", {}, d.domain.replace(/_/g, " ")),
+      el("td", { class: "mono" }, d.cron || "not set"),
+      el("td", {}, sw),
+      el("td", {}, d.next_run ? fmtTime(d.next_run) : "—"),
+      el("td", {}, d.error
+        ? el("span", { class: "msg-error" }, d.error)
+        : el("span", { class: "note" }, last))));
+  }
+  tbl.appendChild(tb);
+  card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  card.appendChild(el("p", { class: "note", style: "margin-top:10px" },
+    "Change a domain's cron in Admin → Domains → Edit profile. Scheduled and manual runs " +
+    "share one queue, so they never overlap; if a brief is still running when its schedule " +
+    "fires, that tick is skipped and recorded here."));
+  host.appendChild(card);
+}
+
+/* ================= runs ================= */
+async function loadRuns() {
+  const host = document.getElementById("tab-runs");
+  const runs = await api("/api/runs?limit=50");
+  host.innerHTML = "";
+  const card = el("div", { class: "card" },
+    el("h2", {}, "Run history",
+      el("span", { class: "hint" }, "every brief and report, with its manifest")));
+  if (!runs.length) {
+    card.appendChild(el("div", { class: "empty" }, el("h3", {}, "No runs yet"),
+      el("p", {}, "Run a brief from the Research desk, or a poll from Data actions.")));
+    host.appendChild(card); return;
+  }
+  const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+    ...["Run", "Domain", "Workload", "Status", "Started", ""].map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const r of runs) {
+    tb.appendChild(el("tr", {},
+      el("td", { class: "mono" }, r.run_id),
+      el("td", {}, r.domain.replace(/_/g, " ")),
+      el("td", {}, r.workload.replace("_", " ")),
+      el("td", {}, statusBadge(r.status)),
+      el("td", {}, fmtTime(r.started_at)),
+      el("td", { style: "text-align:right;white-space:nowrap" },
+        r.output_path ? el("button", { class: "btn small", onclick: () => viewOutput(r) }, "Output") : null, " ",
+        r.manifest_path ? el("button", { class: "btn small", onclick: () => viewManifest(r) }, "Manifest") : null, " ",
+        r.manifest_path ? el("button", { class: "btn small", onclick: () => replayRun(r) }, "Replay") : null)));
+  }
+  tbl.appendChild(tb);
+  card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  card.appendChild(el("p", { class: "note", style: "margin-top:10px" },
+    "Replay re-runs synthesis against the exact frozen evidence in the run's manifest — " +
+    "no re-polling. Wording may differ (models are not byte-deterministic); the evidence, " +
+    "verdicts, and citations are what an audit compares."));
+  host.appendChild(card);
+}
+
+async function viewOutput(r) {
+  try {
+    const out = await api(`/api/runs/${r.run_id}/output`);
+    const body = el("div", { class: "article" }); body.innerHTML = out.html;
+    modal(r.workload.replace("_", " ") + " — " + r.run_id, body, { sub: out.path });
+  } catch (e) { toast(e.message, "err"); }
+}
+async function viewManifest(r) {
+  try {
+    const d = await api(`/api/runs/${r.run_id}`);
+    modal("Manifest — " + r.run_id,
+      el("pre", { class: "json" }, JSON.stringify(d.manifest, null, 2)),
+      { sub: "The audit record: sources, snapshot set, config hashes, models, verdict counts." });
+  } catch (e) { toast(e.message, "err"); }
+}
+function replayRun(r) {
+  api(`/api/actions/replay/${r.run_id}`, { method: "POST" })
+    .then(({ job_id }) => watchJob(job_id, { title: "Replay — " + r.run_id,
+      onDone: (job) => {
+        const c = job.result.comparison || {};
+        modal("Replay finished", el("div", {},
+          el("div", { class: "kv" },
+            el("b", {}, "Snapshot set identical"), el("span", {}, String(c.snapshot_set_identical)),
+            el("b", {}, "Original citations"), el("span", { class: "mono" }, (c.original_cited_sids || []).join(", ") || "—"),
+            el("b", {}, "Replay citations"), el("span", { class: "mono" }, (c.replay_cited_sids || []).join(", ") || "—"),
+            el("b", {}, "Output"), el("span", { class: "mono" }, job.result.output_path))));
+      } }))
+    .catch(e => toast(e.message, "err"));
+}
+
+/* ================= snapshots ================= */
+async function loadSnapshots() {
+  const host = document.getElementById("tab-snapshots");
+  host.innerHTML = "";
+  const q = el("input", { type: "text", placeholder: "Search title or URL…", style: "max-width:280px" });
+  const src = el("select", { style: "width:auto" }, el("option", { value: "" }, "All sources"));
+  api("/api/registry").then(reg => reg.sources.forEach(s =>
+    src.appendChild(el("option", { value: s.id }, s.id)))).catch(() => {});
+  const results = el("div");
+  const run = async () => {
+    const params = new URLSearchParams({ limit: 40 });
+    if (q.value.trim()) params.set("q", q.value.trim());
+    if (src.value) params.set("source", src.value);
+    const rows = await api("/api/snapshots?" + params);
+    results.innerHTML = "";
+    if (!rows.length) {
+      results.appendChild(el("div", { class: "empty" },
+        el("h3", {}, "No snapshots match"),
+        el("p", {}, "Snapshots appear after a poll — each is an immutable, content-hashed copy of a fetched item.")));
+      return;
+    }
+    const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+      ...["Fetched", "Source", "Title / URL", "Type", "Ingest", "Snapshot"].map(h => el("th", {}, h)))));
+    const tb = el("tbody");
+    for (const s of rows) {
+      const tr = el("tr", { class: "click" },
+        el("td", {}, ago(s.fetched_at)),
+        el("td", {}, s.source_id),
+        el("td", {}, A.short(s.title || s.url, 60)),
+        el("td", { class: "mono" }, s.media_type.replace("application/", "").replace("text/", "")),
+        el("td", {}, statusBadge(s.extraction_status)),
+        el("td", { class: "mono" }, A.short(s.content_hash, 12)));
+      tr.addEventListener("click", () => snapshotModal(s.content_hash));
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb);
+    results.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  };
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  src.addEventListener("change", run);
+  host.appendChild(el("div", { class: "card" },
+    el("div", { class: "card-head" }, el("h2", {}, "Snapshot archive"),
+      el("div", { class: "spacer" }), src, q,
+      el("button", { class: "btn", onclick: run }, "Search")),
+    results,
+    el("p", { class: "note", style: "margin-top:10px" },
+      "Every citation in every brief points at one of these hashes. If a publisher edits an " +
+      "article, the re-fetch becomes a new snapshot — both versions stay.")));
+  run();
+}
+
+async function snapshotModal(hash) {
+  try {
+    const s = await api("/api/snapshots/" + hash);
+    modal(s.title || "Snapshot", el("div", {},
+      el("div", { class: "kv", style: "margin-bottom:12px" },
+        el("b", {}, "Snapshot"), el("span", { class: "mono" }, s.content_hash),
+        el("b", {}, "Source"), el("span", {}, s.source_id),
+        el("b", {}, "URL"), el("span", { class: "mono" }, A.short(s.url, 80)),
+        el("b", {}, "Published"), el("span", {}, fmtTime(s.published_at)),
+        el("b", {}, "Fetched"), el("span", {}, fmtTime(s.fetched_at)),
+        el("b", {}, "Story cluster"), el("span", { class: "mono" }, s.cluster_id || "—"),
+        el("b", {}, "Ingest status"), el("span", {}, s.extraction_status)),
+      el("pre", { class: "json" }, s.preview || "(no text preview — " + s.preview_status + ")")));
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ================= data actions ================= */
+async function loadActions() {
+  const host = document.getElementById("tab-actions");
+  if (host.dataset.built) return;
+  host.dataset.built = "1";
+  const ov = await A.overview();
+  DOMAINS = ov.domains.map(d => d.name);
+  const dsel = () => el("select", { style: "width:auto" },
+    ...DOMAINS.map(d => el("option", { value: d }, d)));
+
+  const pollSel = dsel();
+  const goldenSel = dsel();
+  const ingestLimit = el("input", { type: "number", value: 500, min: 1, style: "width:90px" });
+  const validateOut = el("div", { style: "margin-top:10px" });
+
+  const actionCard = (title, desc, controls, onRun, runLabel = "Run") =>
+    el("div", { class: "card" }, el("h2", {}, title),
+      el("p", { class: "note", style: "margin-top:-6px" }, desc),
+      el("div", { class: "btn-row" }, ...controls,
+        el("button", { class: "btn primary", onclick: onRun }, runLabel)));
+
+  host.appendChild(actionCard("Poll sources",
+    "Fetch every active in-scope source for a domain and snapshot anything new. Briefs do this automatically; run it by hand to check feeds.",
+    [pollSel], () => api("/api/actions/poll", { method: "POST", body: { domain: pollSel.value } })
+      .then(({ job_id }) => watchJob(job_id, { title: "Poll — " + pollSel.value,
+        onDone: (job) => {
+          const rows = job.result.sources.map(s =>
+            `${s.status === "error" ? "✗" : "✓"} ${s.source_id}: ${s.items_seen} items, ` +
+            `${s.snapshots_new} new${s.error ? " — " + s.error : ""}`).join("\n");
+          modal("Poll result — " + job.result.domain,
+            el("pre", { class: "json" },
+              `${job.result.items_seen} items · ${job.result.snapshots_new} new snapshots\n\n${rows}`));
+        } }))
+      .catch(e => toast(e.message, "err")), "Poll now"));
+
+  host.appendChild(actionCard("Ingest pending snapshots",
+    "Turn raw snapshots into searchable, entity-tagged chunks in the index (extract → cluster → tag → chunk → embed). Briefs also do this automatically.",
+    [el("span", { class: "note" }, "limit"), ingestLimit],
+    () => api("/api/actions/ingest", { method: "POST", body: { limit: Number(ingestLimit.value) } })
+      .then(({ job_id }) => watchJob(job_id, { title: "Ingest",
+        onDone: (job) => modal("Ingest result", el("pre", { class: "json" },
+          JSON.stringify(job.result, null, 2))) }))
+      .catch(e => toast(e.message, "err")), "Ingest now"));
+
+  const vcard = actionCard("Validate configuration",
+    "Check the registry, adapters, every domain profile, and every cron expression. Run after hand-editing YAML.",
+    [], async () => {
+      validateOut.innerHTML = "";
+      try {
+        const r = await api("/api/actions/validate", { method: "POST" });
+        for (const m of r.messages)
+          validateOut.appendChild(el("div", { class: m.level === "ok" ? "msg-ok" : "msg-error" },
+            (m.level === "ok" ? "✓ " : "✗ ") + m.text));
+        validateOut.appendChild(el("div", { style: "margin-top:8px" },
+          el("span", { class: "badge " + (r.ok ? "good" : "bad") }, r.ok ? "all good" : "problems found")));
+      } catch (e) { toast(e.message, "err"); }
+    }, "Validate");
+  vcard.appendChild(validateOut);
+  host.appendChild(vcard);
+
+  host.appendChild(actionCard("Golden-set check",
+    "Run the domain's canned quality cases (expected verdicts + citation precision). Run after changing a trust policy. Needs tests/golden/<domain>/cases.yaml.",
+    [goldenSel], () => api("/api/actions/golden", { method: "POST", body: { domain: goldenSel.value } })
+      .then(({ job_id }) => watchJob(job_id, { title: "Golden — " + goldenSel.value,
+        onDone: (job) => {
+          const r = job.result;
+          modal("Golden result — " + r.domain, el("div", {},
+            el("div", { class: "btn-row", style: "margin-bottom:10px" },
+              el("span", { class: "badge " + (r.ok ? "good" : "bad") }, r.ok ? "PASS" : "FAIL"),
+              el("span", { class: "note" },
+                `expectations ${(r.expectation_pass_rate * 100).toFixed(0)}% · ` +
+                `citation precision ${r.citation_precision.toFixed(2)}`)),
+            el("pre", { class: "json" }, JSON.stringify(r.outcomes, null, 2))));
+        } }))
+      .catch(e => toast(e.message, "err")), "Run checks"));
+}
+
+/* ================= jobs ================= */
+async function loadJobs() {
+  const host = document.getElementById("tab-jobs");
+  const jobs = await api("/api/jobs?limit=40");
+  host.innerHTML = "";
+  const card = el("div", { class: "card" },
+    el("div", { class: "card-head" }, el("h2", {}, "Job log"),
+      el("div", { class: "spacer" }),
+      el("button", { class: "btn small", onclick: loadJobs }, "Refresh")));
+  if (!jobs.length) {
+    card.appendChild(el("p", { class: "note" }, "No jobs this session. Jobs are kept in memory; run history lives under Runs."));
+    host.appendChild(card); return;
+  }
+  const tbl = el("table", { class: "tbl" }, el("thead", {}, el("tr", {},
+    ...["Job", "Status", "Created", "Note / error", ""].map(h => el("th", {}, h)))));
+  const tb = el("tbody");
+  for (const j of jobs) {
+    tb.appendChild(el("tr", {},
+      el("td", {}, el("div", {}, j.title), el("div", { class: "mono" }, j.id + " · " + j.kind)),
+      el("td", {}, statusBadge(j.status)),
+      el("td", {}, fmtTime(j.created_at)),
+      el("td", {}, el("span", { class: j.error ? "msg-error" : "note" },
+        A.short(j.error || j.note, 80))),
+      el("td", { style: "text-align:right" }, el("button", { class: "btn small",
+        onclick: async () => {
+          const full = await api("/api/jobs/" + j.id);
+          modal("Job — " + full.title, el("pre", { class: "json" },
+            JSON.stringify(full, null, 2)));
+        } }, "Details"))));
+  }
+  tbl.appendChild(tb);
+  card.appendChild(el("div", { class: "tbl-scroll" }, tbl));
+  host.appendChild(card);
+}
+
+/* ================= boot ================= */
+A.masthead("maintenance");
+A.authCheck();
+const initial = location.hash.replace("#", "");
+if (initial && tabs.querySelector(`[data-t="${initial}"]`)) {
+  tabs.querySelector(`[data-t="${initial}"]`).click();
+} else {
+  loadHealth().catch(e => toast(e.message, "err"));
+}
+</script>
+</body>
+</html>

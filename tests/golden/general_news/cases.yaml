@@ -1,0 +1,31 @@
+# Golden cases for general_news (architecture SS12.5).
+# Canned evidence with declared sources/tiers/clusters + expected verdicts.
+targets:
+  expectation_pass_rate: 1.0
+  citation_precision: 0.90
+cases:
+  - name: corroborated_event_and_single_source_attribution
+    docs:
+      - source_id: un_news
+        tier: 1
+        cluster: c-strait-1
+        text: >
+          Port authorities suspended tanker transits through the strait on
+          Monday citing safety concerns.
+      - source_id: bbc_world
+        tier: 2
+        cluster: c-strait-2
+        text: >
+          Port authorities suspended tanker transits through the strait on
+          Monday, officials said.
+      - source_id: al_jazeera_en
+        tier: 2
+        cluster: c-insure-1
+        text: >
+          Regional refiners are quietly renegotiating freight insurance
+          premiums with underwriters this week.
+    expect:
+      - claim_contains: "suspended tanker transits"
+        verdict: confirmed
+      - claim_contains: "freight insurance"
+        verdict: attributed
