@@ -1,52 +1,49 @@
-"""Public-site scraper fetcher adapter (architecture §5.3 plugin point, §7.1, §12.4).
+"""Sitemap-driven site scraper (architecture §5.3 plugin point, §7.1, §12.4).
 
-This is NOT part of the base engine — it is a bespoke `Fetcher` you register by
-name, exactly as §5.3 anticipates ("some domains need a custom adapter … engine
-untouched"). It lets a broad news *portal* (one that has no usable RSS, or mixes
-many subjects) act as a controlled source that only yields pages relevant to a
-given domain.
+Register a broad site as a controlled source by giving ONLY its domain URL. The
+adapter reads the site's robots.txt to discover the sitemaps it declares, walks
+those sitemap trees RECURSIVELY (index -> index -> ... -> urlset) down to article
+URLs, and fetches up to `max_pages` of them — no section seeds, no link crawling,
+no hand-listed URLs.
 
-TOPIC SCOPING — two layers, coarse then fine:
+DISCOVERY, in order:
+  1. robots.txt `Sitemap:` lines (via RobotsGate.site_maps — one fetch also gives
+     the Disallow rules honored on every article fetch);
+  2. any `options.sitemaps` you list — the fallback when robots declares none;
+  3. well-known paths (/sitemap.xml, …) only if 1 and 2 are both empty.
+If none of these yield a sitemap, fetch() raises so the poll loop records the
+source as failing (SS12.3) rather than silently producing nothing.
 
-  1. URL scope (cheap, polite): only same-host links under your seed/section
-     pages are considered, filtered by `url_include` / `url_exclude` regexes.
-     Point the seeds at the site's topical sections (e.g. /markets/, /stocks/)
-     so the fetch budget is spent where the relevant articles live.
+MINIMAL registry entry — just the domain in `endpoints`:
+    fetch:
+      adapter: site_scraper
+      endpoints: ["https://www.example.com/"]
+      options: {}
 
-  2. Relevance vocabulary (accurate): an article is kept only if its extracted
-     text mentions at least `min_matches` distinct entries from a relevance
-     vocabulary — normally the SAME entity dictionary your domain profile already
-     uses for tagging and query expansion (§5.1/§5.2). For a "Nifty50" domain,
-     that dictionary is the 50 constituents + tickers + aliases, so only articles
-     actually about those companies survive. Inline `keywords` can extend it.
+OPTIONAL scoping (see full reference at the bottom):
+  - relevance.dictionary / keywords : keep only articles that mention your
+    domain's entities. STRONGLY recommended for a broad portal — without it every
+    article the site publishes enters the domain and floods the daily brief, since
+    window_scan ingests everything from a tagged source. Reuses the domain's own
+    entity CSV, so 'relevant' means what it means at ingestion-time tagging (SS5.2).
+  - url_include / url_exclude : cheap regex scope applied WHILE walking, so the
+    page budget fills with in-scope URLs instead of junk.
+Ads/boilerplate are stripped downstream by the ingestion extractor (SS7.3); the
+snapshot stays raw HTML (SS7.2). Incremental polls skip sitemap URLs whose
+<lastmod> predates the watermark, so only new/changed articles are fetched.
 
-ADS / BOILERPLATE: the snapshot is stored as raw HTML by design (§7.2, immutable
-raw bytes → reproducible citations). Ad and navigation stripping happens in the
-ingestion extractor (trafilatura, §7.3), the same path every other source uses —
-so ads never reach the index. The scraper additionally emits *article* pages
-only (never section/listing pages full of teasers), and uses the extracted text
-(not the raw page) for the relevance decision, so what it filters on matches what
-gets indexed.
-
-COMPLIANCE (§12.4) — non-negotiable, matching the rest of the system:
-  * robots.txt is honored for EVERY fetch (there is no off-switch here);
-  * requests are rate-limited (`crawl_delay_seconds`) and bounded
-    (`max_listing_pages`, `max_articles`);
-  * crawling never leaves the registered host and never recurses into a spider;
-  * it does NOT bypass paywalls, logins, or any access control.
-  Respecting each site's Terms of Service is the operator's responsibility; say
-  so honestly in the registry `license` field before you activate the source.
-
-CONFIG lives in the registry entry's `fetch.options` (adapter-specific, like the
-http_api adapter). Everything has a sensible default; a minimal config is just
-`endpoints` + a `relevance.dictionary`. Full option reference at the bottom.
+COMPLIANCE (SS12.4): robots.txt honored, rate-limited (`crawl_delay_seconds`),
+bounded (`max_pages`, `max_sitemap_docs`, `max_sitemap_depth`), same-host only, no
+paywall/login bypass. Presents as a normal browser (BROWSER_HEADERS) so a crude
+edge User-Agent filter can't block reading robots.txt or public article pages —
+that is not a challenge bypass; a site behind a real JS/Cloudflare challenge
+should be ingested via its RSS/API (the rss / http_api adapters), not scraped.
 """
 from __future__ import annotations
 
 import re
 import time
 from datetime import datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlsplit
 from xml.etree import ElementTree
@@ -56,26 +53,19 @@ from pydantic import BaseModel, Field
 
 from argus.config.registry import Source
 from argus.fetchers.base import FetchContext, Fetcher, FetchResult, RawItem
-from argus.fetchers.robots import USER_AGENT, RobotsGate
+from argus.fetchers.robots import BROWSER_HEADERS, RobotsGate
 from argus.util import as_naive_utc
 
-# Links we never treat as articles regardless of user config (assets, actions).
-_HARD_SKIP = re.compile(
-    r"^(?:mailto:|tel:|javascript:|#)|\.(?:jpg|jpeg|png|gif|webp|svg|ico|css|js|"
-    r"mp4|mp3|zip|gz|rss|xml)(?:\?|$)",
-    re.IGNORECASE,
-)
+# Tried only when robots.txt / options.sitemaps yield nothing.
+_WELL_KNOWN = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml", "/sitemap/sitemap.xml"]
 
-# Best-effort published-date signals, in priority order.
+_OG_TITLE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', re.I)
+_TITLE = re.compile(r"<title[^>]*>([^<]+)</title>", re.I)
 _DATE_PATTERNS = [
-    re.compile(r'"datePublished"\s*:\s*"([^"]+)"'),                       # JSON-LD
-    re.compile(r'<meta[^>]+property=["\']article:published_time["\']'
-               r'[^>]+content=["\']([^"\']+)', re.IGNORECASE),
-    re.compile(r'<time[^>]+datetime=["\']([^"\']+)', re.IGNORECASE),
+    re.compile(r'"datePublished"\s*:\s*"([^"]+)"'),
+    re.compile(r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)', re.I),
+    re.compile(r'<time[^>]+datetime=["\']([^"\']+)', re.I),
 ]
-_OG_TITLE = re.compile(r'<meta[^>]+property=["\']og:title["\']'
-                       r'[^>]+content=["\']([^"\']+)', re.IGNORECASE)
-_TITLE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------
@@ -83,23 +73,21 @@ _TITLE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
 # --------------------------------------------------------------------------
 
 class _Relevance(BaseModel):
-    dictionary: str | None = None          # CSV path (CWD/repo-root relative or absolute)
+    dictionary: str | None = None          # CSV path (repo-root relative or absolute)
     keywords: list[str] = Field(default_factory=list)
     min_matches: int = Field(default=1, ge=1)
-    prefilter_url: bool = False            # cheap pre-gate on the de-slugified URL
 
 
 class _ScraperOptions(BaseModel):
-    follow_links: bool = True              # harvest article links from the seed pages
-    sitemap: str | None = None             # optional sitemap(-index) URL to enumerate
-    sitemap_max_urls: int = Field(default=2000, ge=1)
-    max_listing_pages: int = Field(default=8, ge=1)
-    max_articles: int = Field(default=40, ge=1)   # caps article-page FETCHES per poll
+    sitemaps: list[str] = Field(default_factory=list)      # fallback if robots declares none
+    max_pages: int = Field(default=50, ge=1)               # article-page FETCH budget
+    max_sitemap_docs: int = Field(default=50, ge=1)        # sitemap documents fetched
+    max_sitemap_depth: int = Field(default=8, ge=1)        # nested-index depth cap
     crawl_delay_seconds: float = Field(default=1.0, ge=0)
-    same_host_only: bool = True
-    url_include: list[str] = Field(default_factory=list)   # keep if ANY matches (when set)
-    url_exclude: list[str] = Field(default_factory=list)   # drop if ANY matches
-    min_text_chars: int = Field(default=500, ge=0)
+    url_include: list[str] = Field(default_factory=list)   # regex; keep matching page URLs
+    url_exclude: list[str] = Field(default_factory=list)   # regex; drop matching page URLs
+    min_text_chars: int = Field(default=400, ge=0)         # skip thin/teaser pages
+    respect_lastmod: bool = True                           # skip URLs older than the watermark
     relevance: _Relevance = Field(default_factory=_Relevance)
 
 
@@ -107,33 +95,58 @@ class _ScraperOptions(BaseModel):
 # helpers
 # --------------------------------------------------------------------------
 
-class _LinkExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.hrefs: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "a":
-            for key, value in attrs:
-                if key == "href" and value:
-                    self.hrefs.append(value)
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
 
 
-def _hosts(endpoints: list[str]) -> set[str]:
-    hosts: set[str] = set()
-    for endpoint in endpoints:
-        netloc = urlsplit(endpoint).netloc.lower()
-        if netloc:
-            hosts.add(netloc)
-            hosts.add(netloc.removeprefix("www."))
-    return hosts
+def _skey(url: str) -> str:
+    return urldefrag(url)[0].rstrip("/")
+
+
+def _normalize_site(s: str) -> str:
+    if not re.match(r"^https?://", s, re.I):
+        s = "https://" + s
+    parts = urlsplit(s)
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def _parse_dt(s: str) -> datetime | None:
+    try:
+        return as_naive_utc(datetime.fromisoformat(s.replace("Z", "+00:00")))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _extract_title(html: str) -> str | None:
+    for pat in (_OG_TITLE, _TITLE):
+        m = pat.search(html)
+        if m:
+            return m.group(1).strip() or None
+    return None
+
+
+def _extract_published(html: str) -> datetime | None:
+    for pat in _DATE_PATTERNS:
+        m = pat.search(html)
+        if m:
+            dt = _parse_dt(m.group(1))
+            if dt is not None:
+                return dt
+    return None
+
+
+def _looks_like_sitemap(resp: httpx.Response | None) -> bool:
+    if resp is None:
+        return False
+    head = resp.text[:1000].lower()
+    return "<sitemapindex" in head or "<urlset" in head
 
 
 def _build_relevance(rel: _Relevance):
-    """An EntityTagger over dictionary + inline keywords, or None (URL-only scope).
-
-    Reuses the engine's own dictionary loader and matcher so 'relevant' means
-    exactly what it means at ingestion-time entity tagging (§5.2)."""
+    """EntityTagger over dictionary + inline keywords, or None (no topic filter).
+    Reuses the engine's own dictionary loader/matcher (SS5.2)."""
+    if not rel.dictionary and not rel.keywords:
+        return None
     from argus.ingest.entities import Entity, EntityTagger, load_dictionary
 
     entities: list[Entity] = []
@@ -141,32 +154,86 @@ def _build_relevance(rel: _Relevance):
         path = Path(rel.dictionary)
         if not path.exists():
             raise FileNotFoundError(
-                f"relevance dictionary not found: {path} (paths resolve relative "
-                f"to the working directory — run from the repo root, as the CLI does)"
-            )
+                f"relevance dictionary not found: {path} (paths resolve relative to "
+                f"the working directory — run from the repo root, as the CLI does)")
         entities.extend(load_dictionary(path))
     entities.extend(Entity(surface=k, canonical_id=k) for k in rel.keywords)
     return EntityTagger(entities) if entities else None
 
 
-def _extract_published(html: str) -> datetime | None:
-    for pattern in _DATE_PATTERNS:
-        m = pattern.search(html)
-        if not m:
-            continue
+def _fetch_xml(get, url: str):
+    resp = get(url)
+    if resp is None:
+        return None
+    data = resp.content
+    if url.endswith(".gz") or data[:2] == b"\x1f\x8b":     # gzipped sitemap
+        import gzip
         try:
-            return as_naive_utc(datetime.fromisoformat(m.group(1).replace("Z", "+00:00")))
-        except ValueError:
+            data = gzip.decompress(data)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return None
+
+
+def _walk_sitemaps(get, roots: list[str], cap: int, inc: list, exc: list,
+                   since: datetime | None, *, max_docs: int, max_depth: int) -> list[dict]:
+    """Walk one or more sitemap trees of ANY depth to page URLs. All roots share
+    one budget and one visited-set. Bounded by cap (page URLs), max_docs (sitemap
+    documents fetched), max_depth, and the visited-set (cycles/diamonds). Filters
+    page URLs by inc/exc while collecting, and drops URLs whose <lastmod> is at or
+    before `since` (unchanged since the last poll)."""
+    from collections import deque
+
+    def keep(u: str) -> bool:
+        if inc and not any(p.search(u) for p in inc):
+            return False
+        return not any(p.search(u) for p in exc)
+
+    pages: list[dict] = []
+    seen: set[str] = set()
+    queue: deque[tuple[str, int]] = deque((u, 0) for u in roots)
+    docs = 0
+    while queue and len(pages) < cap and docs < max_docs:
+        sm_url, depth = queue.popleft()
+        if _skey(sm_url) in seen:
             continue
-    return None
-
-
-def _extract_title(html: str) -> str | None:
-    for pattern in (_OG_TITLE, _TITLE):
-        m = pattern.search(html)
-        if m:
-            return m.group(1).strip() or None
-    return None
+        seen.add(_skey(sm_url))
+        root = _fetch_xml(get, sm_url)
+        docs += 1
+        if root is None:
+            continue
+        if _local(root.tag) == "sitemapindex":
+            if depth < max_depth:
+                for loc in root.findall(".//{*}loc"):
+                    if loc.text and _skey(loc.text.strip()) not in seen:
+                        queue.append((loc.text.strip(), depth + 1))
+            continue
+        for url_el in root.iter():                         # a <urlset>
+            if _local(url_el.tag) != "url":
+                continue
+            loc_el = url_el.find("{*}loc")                 # direct child (not image:loc)
+            if loc_el is None or not loc_el.text:
+                continue
+            loc = loc_el.text.strip()
+            if not keep(loc):
+                continue
+            lastmod_el = url_el.find("{*}lastmod")
+            lastmod = (lastmod_el.text or "").strip() if lastmod_el is not None else ""
+            if since is not None and lastmod:
+                dt = _parse_dt(lastmod)
+                if dt is not None and dt <= since:
+                    continue                               # unchanged since last poll
+            title_el = url_el.find(".//{*}title")          # news:title if present
+            pages.append({
+                "url": loc, "lastmod": lastmod,
+                "title": (title_el.text or "").strip() if title_el is not None else "",
+            })
+            if len(pages) >= cap:
+                break
+    return pages[:cap]
 
 
 # --------------------------------------------------------------------------
@@ -178,16 +245,15 @@ class SiteScraperFetcher(Fetcher):
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client or httpx.Client(
-            timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}
-        )
+            timeout=25, follow_redirects=True, headers=BROWSER_HEADERS)
         self._robots = RobotsGate(self._client)
         self._last_get = 0.0
         self._delay = 0.0
 
-    # -- polite, robots-gated GET ------------------------------------------
     def _get(self, url: str) -> httpx.Response | None:
-        if not self._robots.allowed(url):
-            return None  # robots.txt disallows — skip silently (§12.4)
+        """Throttled GET (used for sitemaps AND articles). Swallows per-URL errors —
+        one bad URL never aborts the source; total failure surfaces as an empty walk
+        or the no-sitemaps raise."""
         wait = self._delay - (time.monotonic() - self._last_get)
         if wait > 0:
             time.sleep(wait)
@@ -196,171 +262,122 @@ class SiteScraperFetcher(Fetcher):
             self._last_get = time.monotonic()
             resp.raise_for_status()
             return resp
-        except Exception:
+        except Exception:  # noqa: BLE001
             self._last_get = time.monotonic()
-            return None  # one bad URL never aborts the source (poll loop isolates sources)
+            return None
 
-    # -- URL candidate discovery -------------------------------------------
-    def _candidates(self, source: Source, opts: _ScraperOptions,
-                    includes: list[re.Pattern], excludes: list[re.Pattern]) -> list[str]:
-        allowed_hosts = _hosts(source.fetch.endpoints)
-        seen: set[str] = set()
-        ordered: list[str] = []
+    def _discover_sitemaps(self, site_roots: list[str], explicit: list[str]) -> list[str]:
+        declared: list[str] = []
+        for root in site_roots:
+            declared += self._robots.site_maps(root)
+        sitemaps = list(dict.fromkeys(explicit + declared))    # explicit first, deduped
+        if not sitemaps:                                       # well-known fallback
+            for root in site_roots:
+                for path in _WELL_KNOWN:
+                    cand = urljoin(root, path)
+                    if _looks_like_sitemap(self._get(cand)):
+                        sitemaps.append(cand)
+        return sitemaps
 
-        def consider(raw_url: str, base: str) -> None:
-            url = urldefrag(urljoin(base, raw_url.strip()))[0]
-            if not url or url in seen:
-                return
-            if _HARD_SKIP.search(url):
-                return
-            if opts.same_host_only and urlsplit(url).netloc.lower() not in allowed_hosts:
-                return
-            if includes and not any(p.search(url) for p in includes):
-                return
-            if any(p.search(url) for p in excludes):
-                return
-            seen.add(url)
-            ordered.append(url)
-
-        if opts.sitemap:
-            for url in self._sitemap_urls(opts.sitemap, opts.sitemap_max_urls):
-                consider(url, opts.sitemap)
-
-        if opts.follow_links:
-            for endpoint in source.fetch.endpoints[: opts.max_listing_pages]:
-                resp = self._get(endpoint)
-                if resp is None:
-                    continue
-                extractor = _LinkExtractor()
-                extractor.feed(resp.text)
-                for href in extractor.hrefs:
-                    consider(href, str(resp.url))
-
-        return ordered
-
-    def _sitemap_urls(self, sitemap_url: str, cap: int) -> list[str]:
-        resp = self._get(sitemap_url)
-        if resp is None:
-            return []
-        try:
-            root = ElementTree.fromstring(resp.content)
-        except ElementTree.ParseError:
-            return []
-        # `.//{*}loc` honors the sitemap namespace via ElementPath's wildcard;
-        # `Element.iter("{*}loc")` would NOT (iter does exact tag-string matching).
-        locs = [el.text.strip() for el in root.findall(".//{*}loc") if el.text]
-        if root.tag.rsplit("}", 1)[-1].lower() == "sitemapindex":
-            urls: list[str] = []
-            for child in locs[:20]:                       # bounded index expansion
-                child_resp = self._get(child)
-                if child_resp is None:
-                    continue
-                try:
-                    child_root = ElementTree.fromstring(child_resp.content)
-                except ElementTree.ParseError:
-                    continue
-                urls += [el.text.strip() for el in child_root.findall(".//{*}loc") if el.text]
-                if len(urls) >= cap:
-                    break
-            return urls[:cap]
-        return locs[:cap]
-
-    # -- relevance ----------------------------------------------------------
-    @staticmethod
-    def _slug_text(url: str) -> str:
-        return re.sub(r"[-_/]+", " ", urlsplit(url).path)
-
-    # -- main ---------------------------------------------------------------
     def fetch(self, source: Source, ctx: FetchContext) -> FetchResult:
-        import trafilatura  # lazy (heavy): kept off the adapter-registry import path
+        import trafilatura  # lazy (heavy): off the adapter-registry import path
 
         opts = _ScraperOptions.model_validate(source.fetch.options)
         self._delay = opts.crawl_delay_seconds
         try:
-            includes = [re.compile(p, re.IGNORECASE) for p in opts.url_include]
-            excludes = [re.compile(p, re.IGNORECASE) for p in opts.url_exclude]
-        except re.error as exc:
-            raise ValueError(f"{source.id}: bad url_include/url_exclude regex: {exc}")
+            inc = [re.compile(p, re.I) for p in opts.url_include]
+            exc = [re.compile(p, re.I) for p in opts.url_exclude]
+        except re.error as exc_err:
+            raise ValueError(f"{source.id}: bad url_include/url_exclude regex: {exc_err}")
 
         tagger = _build_relevance(opts.relevance)
-        min_matches = opts.relevance.min_matches
+        site_roots = [_normalize_site(e) for e in source.fetch.endpoints]
+        allowed_hosts = {urlsplit(r).netloc.lower().removeprefix("www.") for r in site_roots}
 
-        candidates = self._candidates(source, opts, includes, excludes)
+        sitemaps = self._discover_sitemaps(site_roots, opts.sitemaps)
+        if not sitemaps:
+            raise ValueError(
+                f"{source.id}: no sitemaps found in robots.txt, options.sitemaps, or "
+                f"well-known paths for {sorted(allowed_hosts)}. List one under "
+                f"options.sitemaps, or use the rss/http_api adapter for this source.")
+
+        since = ctx.since if opts.respect_lastmod else None
+        candidates = _walk_sitemaps(self._get, sitemaps, opts.max_pages, inc, exc, since,
+                                    max_docs=opts.max_sitemap_docs, max_depth=opts.max_sitemap_depth)
 
         items: list[RawItem] = []
         fetches = 0
-        for url in candidates:
-            if fetches >= opts.max_articles:
+        for cand in candidates:
+            if fetches >= opts.max_pages:
                 break
-
-            # Cheap pre-gate: skip fetching pages whose slug shows no vocabulary
-            # hit (opt-in; a slug can legitimately omit the entity, so default off).
-            if tagger is not None and opts.relevance.prefilter_url:
-                if len(tagger.tag(self._slug_text(url))) < 1:
-                    continue
+            url = cand["url"]
+            if urlsplit(url).netloc.lower().removeprefix("www.") not in allowed_hosts:
+                continue                                   # sitemap listed an off-site URL
+            if not self._robots.allowed(url):
+                continue                                   # robots.txt disallows
 
             resp = self._get(url)
             fetches += 1
             if resp is None:
                 continue
+            content_type = resp.headers.get("Content-Type", "text/html").split(";")[0].strip()
+            if content_type and "html" not in content_type and content_type != "text/plain":
+                continue                                   # skip binaries / non-articles
 
             html = resp.text
-            # Extract the SAME way ingestion will, so the relevance check matches
-            # what gets indexed (§7.3). Ads/nav are stripped here for the decision.
             body = trafilatura.extract(html, include_comments=False) or ""
             if len(body.strip()) < opts.min_text_chars:
-                continue  # teaser/listing/thin page — not a real article
+                continue                                   # teaser/listing/thin page
 
             matches: list[str] = []
             if tagger is not None:
-                title_text = _extract_title(html) or ""
-                matches = tagger.tag(f"{title_text}\n{body}")
-                if len(matches) < min_matches:
-                    continue  # off-topic for this domain — drop
+                matches = tagger.tag(f"{_extract_title(html) or ''}\n{body}")
+                if len(matches) < opts.relevance.min_matches:
+                    continue                               # off-topic for this domain
 
-            published = _extract_published(html)
-            if ctx.since is not None and published is not None and published <= ctx.since:
-                continue  # older than the watermark (content-hash dedup is the real guard)
-
-            content_type = resp.headers.get("Content-Type", "text/html").split(";")[0]
+            published = _parse_dt(cand.get("lastmod", "")) or _extract_published(html)
             items.append(RawItem(
                 source_id=source.id,
                 url=urldefrag(str(resp.url))[0],
-                content=resp.content,                     # raw HTML bytes (§7.2)
+                content=resp.content,                      # raw HTML bytes (SS7.2)
                 media_type=content_type or "text/html",
-                title=_extract_title(html),
+                title=_extract_title(html) or (cand.get("title") or None),
                 published_at=published,
                 meta={
                     "kind": "scraped_article",
                     "adapter": self.name,
-                    "relevance_matches": matches,          # audit which entities matched
+                    "relevance_matches": matches,
+                    "sitemap_lastmod": cand.get("lastmod", ""),
                     "http_status": resp.status_code,
                 },
             ))
 
-        # No conditional-GET here: a multi-URL crawl has no single validator to
-        # store in the per-source watermark, so we rely on `since` + the snapshot
-        # store's content-hash dedup (unchanged articles re-hash identically and
-        # are recorded as duplicates, never re-indexed).
+        # No conditional GET: a multi-URL crawl has no single validator for the
+        # per-source watermark. Incremental freshness comes from <lastmod> vs
+        # ctx.since above, backed by the snapshot store's content-hash dedup.
         return FetchResult(items=items)
 
 
 # =============================================================================
-# OPTION REFERENCE (place under a registry entry's `fetch.options`)
+# OPTION REFERENCE (place under a registry entry's `fetch.options`; all optional)
 # -----------------------------------------------------------------------------
-# follow_links: true            # harvest <a href> article links from the seeds
-# sitemap: null                 # optional sitemap or sitemap-index URL to enumerate
-# sitemap_max_urls: 2000
-# max_listing_pages: 8          # how many seed/section pages to scan for links
-# max_articles: 40              # hard cap on article-page fetches per poll (politeness)
+# The registry entry's `endpoints` holds the domain URL(s) — that is the only
+# required input. A source scraping one topical site needs no options at all.
+#
+# sitemaps: []                  # explicit sitemap URL(s); used when robots.txt
+#                               #   declares none (also the place to point at a
+#                               #   site's dedicated news-sitemap for freshness)
+# max_pages: 50                 # article-page FETCH budget per poll (relevance
+#                               #   filtering may yield fewer items than this)
+# max_sitemap_docs: 50          # cap on sitemap DOCUMENTS fetched while walking
+# max_sitemap_depth: 8          # nested sitemap-index depth cap
 # crawl_delay_seconds: 1.0      # minimum gap between requests
-# same_host_only: true          # never leave the registered host
-# url_include: []               # regex list; a candidate must match >=1 (when non-empty)
-# url_exclude: []               # regex list; drop a candidate matching any
-# min_text_chars: 500           # skip thin/teaser pages after extraction
-# relevance:
-#   dictionary: "domains/nifty50/entities/nifty50.csv"   # normally your domain's own CSV
-#   keywords: ["Nifty 50", "Nifty50", "NSE"]             # extends the dictionary
-#   min_matches: 1              # >= N distinct vocabulary hits in title+body to keep
-#   prefilter_url: false        # also require a vocabulary hit in the URL slug (fewer fetches)
+# url_include: []               # regex list; keep only matching page URLs
+# url_exclude: []               # regex list; drop matching page URLs
+# min_text_chars: 400           # skip pages with less extracted text than this
+# respect_lastmod: true         # skip sitemap URLs whose <lastmod> <= watermark
+# relevance:                    # topic scoping (recommended for broad portals)
+#   dictionary: "domains/<d>/entities/<d>.csv"   # usually your domain's own CSV
+#   keywords: ["..."]                            # extends the dictionary
+#   min_matches: 1              # >= N distinct entity hits in title+body to keep
 # =============================================================================
